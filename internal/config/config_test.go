@@ -1,0 +1,54 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
+
+func TestLoadLayersDefaultsFileThenEnv(t *testing.T) {
+	home := t.TempDir()
+	os.WriteFile(filepath.Join(home, "config.toml"), []byte("ci_poll = \"5s\"\ncall_timeout = \"1m\"\n"), 0o644)
+	c, err := Load(home, env(map[string]string{"FOUNDRY_CI_POLL": "1s"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CIPoll.Duration != time.Second || c.CallTimeout.Duration != time.Minute || c.ReviewTimeout.Duration != 30*time.Minute {
+		t.Fatalf("ci_poll=%s call_timeout=%s review_timeout=%s", c.CIPoll, c.CallTimeout, c.ReviewTimeout)
+	}
+}
+
+func TestLoadFailsLoudlyOnBadConfig(t *testing.T) {
+	home := t.TempDir()
+	os.WriteFile(filepath.Join(home, "config.toml"), []byte("ci_pol = \"5s\"\n"), 0o644)
+	if _, err := Load(home, env(nil)); err == nil || !strings.Contains(err.Error(), "unknown keys") {
+		t.Errorf("unknown key: %v", err)
+	}
+	clean := t.TempDir()
+	if _, err := Load(clean, env(map[string]string{"FOUNDRY_CI_POLL": "0s"})); err == nil || !strings.Contains(err.Error(), "ci_poll must be positive") {
+		t.Errorf("zero duration: %v", err)
+	}
+	if _, err := Load(clean, env(map[string]string{"FOUNDRY_LOG_LEVEL": "loud"})); err == nil || !strings.Contains(err.Error(), "log_level") {
+		t.Errorf("bad level: %v", err)
+	}
+}
+
+func TestLoadRepo(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadRepo(dir); err == nil || !strings.Contains(err.Error(), "no foundry.toml") {
+		t.Errorf("missing file: %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, "foundry.toml"), []byte("base = \"main\"\n"), 0o644)
+	if _, err := LoadRepo(dir); err == nil || !strings.Contains(err.Error(), "checks") {
+		t.Errorf("no checks: %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, "foundry.toml"), []byte("checks = [\"go test ./...\"]\n"), 0o644)
+	r, err := LoadRepo(dir)
+	if err != nil || r.Base != "main" || r.MaxFrictionPerShip != 3 {
+		t.Fatalf("%+v %v", r, err)
+	}
+}
