@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/tunedev/foundry/internal/core/ports"
 )
@@ -32,5 +33,17 @@ func TestClassifyMarksOnlyRetryableFailures(t *testing.T) {
 	}
 	if Classify(nil) != nil {
 		t.Error("nil classified as an error")
+	}
+}
+
+func TestClassifyIgnoresStdout(t *testing.T) {
+	ctx := t.Context()
+	_, err := Cmd(ctx, time.Minute, t.TempDir(), nil, "sh", "-c", "echo 'blocker: retries on HTTP 503 without backoff'; exit 1")
+	if errors.Is(Classify(err), ports.ErrTransient) {
+		t.Errorf("findings on stdout classified transient: %v", err)
+	}
+	_, err = Cmd(ctx, time.Minute, t.TempDir(), nil, "sh", "-c", "echo 'HTTP 502: Bad Gateway' >&2; exit 1")
+	if !errors.Is(Classify(err), ports.ErrTransient) {
+		t.Errorf("502 on stderr not transient: %v", err)
 	}
 }
