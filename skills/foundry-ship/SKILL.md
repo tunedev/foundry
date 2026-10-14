@@ -11,7 +11,9 @@ Run `foundry ship` from the repo. Read its last line, do what it says, and rerun
 ## When it stops
 
 - `stop at preflight`, `stop at checks` or `stop at ci`: fix the cause, commit, rerun.
-- `stop at review`: fix vouch's findings, commit, rerun. Never run `vouch ack` or `vouch rules accept`.
+- `stop at review: vouch did not pass`: fix vouch's findings, commit, rerun. Never run `vouch ack` or
+  `vouch rules accept`.
+- `stop at review: vouch failed to run`: report the error to the user and stop.
 - `stop at push-pr` asking for a recap: write the pull request body to a file and rerun with
   `--recap <file>`. Use these `## ` headings:
   - `What and why`

@@ -12,6 +12,9 @@ var ErrTransient = errors.New("transient")
 // ErrDiverged marks a push the remote rejected because its branch holds commits HEAD lacks.
 var ErrDiverged = errors.New("remote branch has diverged")
 
+// ErrFindings marks a review gate that denied the code. Its message carries the findings.
+var ErrFindings = errors.New("review findings")
+
 type PR struct {
 	Number  int
 	URL     string

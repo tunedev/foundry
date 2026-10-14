@@ -114,10 +114,13 @@ func runChecks(ctx context.Context, d ShipDeps, in ShipInput) error {
 
 func review(ctx context.Context, d ShipDeps, in ShipInput) error {
 	err := retryOnce(ctx, in.RetryPause, func() error { return d.Review(ctx, in.Dir) })
-	if err == nil || isTransient(err) {
+	switch {
+	case err == nil || isTransient(err):
 		return err
+	case errors.Is(err, ports.ErrFindings):
+		return needs("review", "vouch did not pass this code; fix the findings, commit, rerun:\n%v", err)
 	}
-	return needs("review", "vouch did not pass this code; fix the findings, commit, rerun:\n%v", err)
+	return needs("review", "vouch failed to run; report this error to the user:\n%v", err)
 }
 
 // pushAndPR pushes HEAD when origin lacks it and makes sure an open pull request carries a valid recap.

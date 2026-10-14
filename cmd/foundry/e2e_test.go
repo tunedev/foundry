@@ -292,9 +292,18 @@ func TestShipStopsAtFailingCheckWithItsOutput(t *testing.T) {
 
 func TestShipStopsAtVouchFindings(t *testing.T) {
 	w := newWorld(t, "feat")
-	w.write(w.root, "vouch-gate-fail", "blocker calc.go:1 unchecked overflow\n")
+	w.write(w.root, "vouch-gate-fail", "minor calc.go:1 retries on HTTP 502 without backoff\n")
 	out, _, code := w.foundry("ship", "--recap", w.recap())
-	if code != 1 || !strings.Contains(out, "stop at review") || !strings.Contains(out, "unchecked overflow") {
+	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") || !strings.Contains(out, "without backoff") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestShipReportsAVouchRunErrorAsNotFindings(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.write(w.root, "vouch-review-fail", "vouch: no review rules for github.com/acme/widget\n")
+	out, _, code := w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "stop at review: vouch failed to run") || !strings.Contains(out, "no review rules") {
 		t.Fatalf("code %d\n%s", code, out)
 	}
 }
