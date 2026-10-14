@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -133,7 +134,12 @@ func pushAndPR(ctx context.Context, d ShipDeps, in ShipInput, branch string) (st
 		return head, pr, err
 	}
 	if remote != head {
-		if err := retryOnce(ctx, in.RetryPause, func() error { return d.Push(ctx, in.Dir, branch) }); err != nil {
+		err := retryOnce(ctx, in.RetryPause, func() error { return d.Push(ctx, in.Dir, branch) })
+		if errors.Is(err, ports.ErrDiverged) {
+			return head, pr, needs("push-pr", "origin/%s has commits HEAD lacks: the branch was rebased or amended here, "+
+				"or someone else pushed to it. foundry never force-pushes; ask the user whether to overwrite origin/%s", branch, branch)
+		}
+		if err != nil {
 			return head, pr, err
 		}
 	}

@@ -357,3 +357,18 @@ func TestFrictionDoesNotDuplicateIssueWhenCreateResponseIsLost(t *testing.T) {
 		t.Fatalf("code %d\n%s\nstate %+v", code, out, s)
 	}
 }
+
+func TestShipStopsWithoutForcePushingADivergedBranch(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.foundry("friction", "none", "--reason", "smooth run")
+	if _, _, code := w.foundry("ship", "--recap", w.recap()); code != 0 {
+		t.Fatalf("first ship: code %d", code)
+	}
+	remote := w.git(w.origin, "rev-parse", "refs/heads/feat")
+	w.git(w.checkout, "commit", "-q", "--amend", "-m", "rewritten")
+	out, _, code := w.foundry("ship")
+	if code != 1 || !strings.Contains(out, "stop at push-pr") || !strings.Contains(out, "never force-pushes") ||
+		w.git(w.origin, "rev-parse", "refs/heads/feat") != remote {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}

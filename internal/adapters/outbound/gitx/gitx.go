@@ -3,11 +3,13 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/tunedev/foundry/internal/core/ports"
 	"github.com/tunedev/foundry/internal/run"
 )
 
@@ -71,8 +73,13 @@ func (g Git) RemoteSHA(ctx context.Context, dir, branch string) (string, error) 
 	return "", err
 }
 
+// Push publishes HEAD as branch on origin, never forcing. A rejection because origin's branch holds
+// commits HEAD lacks returns ports.ErrDiverged.
 func (g Git) Push(ctx context.Context, dir, branch string) error {
 	_, err := g.out(ctx, dir, "push", "-q", "-u", "origin", "HEAD:refs/heads/"+branch)
+	if e, ok := errors.AsType[*run.Error](err); ok && strings.Contains(e.Stderr, "[rejected]") {
+		return fmt.Errorf("%w: %w", ports.ErrDiverged, err)
+	}
 	return err
 }
 

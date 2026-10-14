@@ -9,6 +9,9 @@ import (
 // ErrTransient marks a failure worth one retry: a timeout, a network error, a forge 5xx or rate limit.
 var ErrTransient = errors.New("transient")
 
+// ErrDiverged marks a push the remote rejected because its branch holds commits HEAD lacks.
+var ErrDiverged = errors.New("remote branch has diverged")
+
 type PR struct {
 	Number  int
 	URL     string
