@@ -46,9 +46,11 @@ func FileFriction(ctx context.Context, d FrictionDeps, in FileInput) (Filed, err
 		return Filed{}, needs("friction", "this branch already reported %d friction issues, the maximum", len(a.Issues))
 	}
 	var f Filed
+	attempt := 0
 	err = step(ctx, "file friction", func() error {
 		return retryOnce(ctx, in.RetryPause, func() (err error) {
-			f, err = fileOnce(ctx, d.Forge, in)
+			attempt++
+			f, err = fileOnce(ctx, d.Forge, in, attempt > 1)
 			return err
 		})
 	})
@@ -60,15 +62,22 @@ func FileFriction(ctx context.Context, d FrictionDeps, in FileInput) (Filed, err
 	return f, d.Save(in.Repo, in.Branch, a)
 }
 
-// fileOnce lists open friction issues before writing, so a retry after a lost response comments
-// on the issue the first attempt created instead of creating a second one.
-func fileOnce(ctx context.Context, forge ports.Forge, in FileInput) (Filed, error) {
+// fileOnce lists open friction issues before writing. On a retry, an open issue with exactly this
+// title is the one the lost first attempt created, so it is returned as filed, with no comment.
+func fileOnce(ctx context.Context, forge ports.Forge, in FileInput, retry bool) (Filed, error) {
 	if err := forge.EnsureLabels(ctx, in.Dir, friction.AllLabels); err != nil {
 		return Filed{}, err
 	}
 	open, err := forge.OpenIssues(ctx, in.Dir, friction.Label)
 	if err != nil {
 		return Filed{}, err
+	}
+	if retry {
+		for _, is := range open {
+			if is.Title == in.Title {
+				return Filed{Issue: is}, nil
+			}
+		}
 	}
 	if m, ok := friction.Match(in.Title, open); ok {
 		return Filed{Issue: m, Duplicate: true}, forge.CommentIssue(ctx, in.Dir, m.Number, "Hit again from branch `"+in.Branch+"`.\n\n"+in.Body)

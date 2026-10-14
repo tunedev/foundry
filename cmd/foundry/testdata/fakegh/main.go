@@ -1,5 +1,6 @@
 // Command fakegh stands in for gh in foundry's end-to-end tests. Its state is the JSON file named by
-// FAKE_STATE. A pull request's head is read from the checkout's origin, as GitHub would report it.
+// FAKE_STATE. fail_once fails a command before it writes; lose_once fails it after it writes, as when
+// a response is lost. A pull request's head is read from the checkout's origin, as GitHub would report it.
 package main
 
 import (
@@ -48,6 +49,7 @@ type state struct {
 	Checks      [][]check         `json:"checks"`
 	ChecksCalls int               `json:"checks_calls"`
 	FailOnce    map[string]string `json:"fail_once"`
+	LoseOnce    map[string]string `json:"lose_once"`
 	Writes      int               `json:"writes"`
 }
 
@@ -66,6 +68,11 @@ func main() {
 		os.Exit(1)
 	}
 	code := handle(&s, cmd, args[min(2, len(args)):])
+	if msg, ok := s.LoseOnce[cmd]; ok && code == 0 {
+		delete(s.LoseOnce, cmd)
+		fmt.Fprintln(os.Stderr, msg)
+		code = 1
+	}
 	save(path, s)
 	os.Exit(code)
 }

@@ -338,3 +338,22 @@ func TestShipPushesNewCommitsOnRerun(t *testing.T) {
 		t.Fatalf("code %d\n%s", code, out)
 	}
 }
+
+func TestShipDoesNotDuplicatePRWhenCreateResponseIsLost(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.foundry("friction", "none", "--reason", "smooth run")
+	w.setGH(`{"lose_once":{"pr create":"HTTP 502: Bad Gateway (https://api.github.com/graphql)"}}`)
+	if out, _, code := w.foundry("ship", "--recap", w.recap()); code != 0 || len(w.gh().PRs) != 1 {
+		t.Fatalf("code %d, prs %d\n%s", code, len(w.gh().PRs), out)
+	}
+}
+
+func TestFrictionDoesNotDuplicateIssueWhenCreateResponseIsLost(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.setGH(`{"lose_once":{"issue create":"HTTP 502: Bad Gateway (https://api.github.com/graphql)"}}`)
+	body := w.write(w.root, "f.md", goodFriction)
+	out, _, code := w.foundry("friction", "file", "--title", "Slow tests", "--body-file", body, "--kind", "ready")
+	if s := w.gh(); code != 0 || !strings.Contains(out, "filed #1") || len(s.Issues) != 1 || len(s.Comments) != 0 {
+		t.Fatalf("code %d\n%s\nstate %+v", code, out, s)
+	}
+}
