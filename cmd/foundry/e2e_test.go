@@ -205,3 +205,136 @@ func TestFrictionRejectsUnknownKind(t *testing.T) {
 		t.Fatalf("code %d\n%s", code, errOut)
 	}
 }
+
+func TestShipRefusesBaseBranch(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.git(w.checkout, "checkout", "-q", "main")
+	if out, _, code := w.foundry("ship", "--recap", w.recap()); code != 1 || !strings.Contains(out, "stop at preflight") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestShipHandsOffAfterFrictionIsReported(t *testing.T) {
+	branch := "friction/12-slow-tests"
+	w := newWorld(t, branch)
+	out, errOut, code := w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "stop at friction") {
+		t.Fatalf("code %d\n%s%s", code, out, errOut)
+	}
+	if prs := w.gh().PRs; len(prs) != 1 || !strings.Contains(prs[0].Body, "## Risk") {
+		t.Fatalf("prs %+v", prs)
+	}
+	if w.git(w.origin, "rev-parse", "refs/heads/"+branch) != w.git(w.checkout, "rev-parse", "HEAD") {
+		t.Fatal("branch not pushed")
+	}
+	if _, _, code := w.foundry("friction", "none", "--reason", "smooth run"); code != 0 {
+		t.Fatalf("friction none: code %d", code)
+	}
+	out, _, code = w.foundry("ship")
+	if code != 0 || !strings.Contains(out, "ready for human: https://github.com/acme/widget/pull/1") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+	runs := w.runs()
+	if last := runs[len(runs)-1]; last.Outcome != "ready-for-human" || last.Branch != branch || last.Step != "hand-off" || last.PRURL == "" {
+		t.Fatalf("run record %+v", last)
+	}
+}
+
+func TestShipRerunMakesNoRemoteWrites(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.foundry("friction", "none", "--reason", "smooth run")
+	if out, _, code := w.foundry("ship", "--recap", w.recap()); code != 0 {
+		t.Fatalf("first ship: code %d\n%s", code, out)
+	}
+	writes, remote := w.gh().Writes, w.git(w.origin, "rev-parse", "refs/heads/feat")
+	out, _, code := w.foundry("ship", "--recap", w.recap())
+	if code != 0 || w.gh().Writes != writes || w.git(w.origin, "rev-parse", "refs/heads/feat") != remote {
+		t.Fatalf("rerun: code %d, writes %d -> %d\n%s", code, writes, w.gh().Writes, out)
+	}
+}
+
+func TestShipNeedsRecapWithRiskLevel(t *testing.T) {
+	w := newWorld(t, "feat")
+	out, _, code := w.foundry("ship")
+	if code != 1 || !strings.Contains(out, "stop at push-pr") || !strings.Contains(out, "--recap") {
+		t.Fatalf("no recap: code %d\n%s", code, out)
+	}
+	bad := w.write(w.root, "bad.md", strings.Replace(goodRecap, "low: one pure function", "fine", 1))
+	out, _, code = w.foundry("ship", "--recap", bad)
+	if code != 1 || !strings.Contains(out, "Risk must start with low, medium or high") || len(w.gh().PRs) != 0 {
+		t.Fatalf("bad risk: code %d\n%s", code, out)
+	}
+}
+
+func TestShipReplacesInvalidBodyOnlyWithRecap(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.setGH(`{"prs":[{"number":1,"url":"https://github.com/acme/widget/pull/1","body":"quick fix","head":"feat"}]}`)
+	out, _, code := w.foundry("ship")
+	if code != 1 || !strings.Contains(out, "PR #1 body") || w.gh().PRs[0].Body != "quick fix" {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+	w.foundry("friction", "none", "--reason", "smooth run")
+	out, _, code = w.foundry("ship", "--recap", w.recap())
+	if s := w.gh(); code != 0 || len(s.PRs) != 1 || !strings.Contains(s.PRs[0].Body, "## What and why") {
+		t.Fatalf("code %d\n%s\nstate %+v", code, out, s)
+	}
+}
+
+func TestShipStopsAtFailingCheckWithItsOutput(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.write(w.checkout, "foundry.toml", "checks = [\"echo TestAdd failed; exit 1\"]\n")
+	w.git(w.checkout, "commit", "-qam", "break the check")
+	out, _, code := w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "stop at checks") || !strings.Contains(out, "TestAdd failed") || len(w.gh().PRs) != 0 {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestShipStopsAtVouchFindings(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.write(w.root, "vouch-gate-fail", "blocker calc.go:1 unchecked overflow\n")
+	out, _, code := w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "stop at review") || !strings.Contains(out, "unchecked overflow") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestShipWaitsOutPendingCIThenReportsFailure(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.setGH(`{"checks":[[],[{"name":"build","bucket":"pending"}],[{"name":"build","bucket":"fail","link":"https://ci/run/9"}]]}`)
+	out, _, code := w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "stop at ci") || !strings.Contains(out, "https://ci/run/9") || w.gh().ChecksCalls != 3 {
+		t.Fatalf("code %d, checks calls %d\n%s", code, w.gh().ChecksCalls, out)
+	}
+}
+
+func TestShipStopsWhenCIStaysPending(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.env = append(w.env, "FOUNDRY_CI_TIMEOUT=50ms")
+	w.setGH(`{"checks":[[{"name":"build","bucket":"pending"}]]}`)
+	if out, _, code := w.foundry("ship", "--recap", w.recap()); code != 1 || !strings.Contains(out, "still pending") {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestShipRetriesTransientPRCreateOnce(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.foundry("friction", "none", "--reason", "smooth run")
+	w.setGH(`{"fail_once":{"pr create":"HTTP 502: Bad Gateway (https://api.github.com/graphql)"}}`)
+	if out, _, code := w.foundry("ship", "--recap", w.recap()); code != 0 || len(w.gh().PRs) != 1 {
+		t.Fatalf("code %d, prs %d\n%s", code, len(w.gh().PRs), out)
+	}
+}
+
+func TestShipPushesNewCommitsOnRerun(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.foundry("friction", "none", "--reason", "smooth run")
+	if _, _, code := w.foundry("ship", "--recap", w.recap()); code != 0 {
+		t.Fatalf("first ship: code %d", code)
+	}
+	head := w.commit("review follow-up")
+	out, _, code := w.foundry("ship")
+	if code != 0 || w.git(w.origin, "rev-parse", "refs/heads/feat") != head {
+		t.Fatalf("code %d\n%s", code, out)
+	}
+}

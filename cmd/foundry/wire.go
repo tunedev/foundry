@@ -7,8 +7,10 @@ import (
 	"github.com/tunedev/foundry/internal/adapters/outbound/github"
 	"github.com/tunedev/foundry/internal/adapters/outbound/gitx"
 	"github.com/tunedev/foundry/internal/adapters/outbound/store"
+	"github.com/tunedev/foundry/internal/adapters/outbound/vouch"
 	"github.com/tunedev/foundry/internal/config"
 	"github.com/tunedev/foundry/internal/core/app"
+	runner "github.com/tunedev/foundry/internal/run"
 )
 
 // repoEnv is the opted-in repo foundry runs in, with the adapters every command uses.
@@ -45,4 +47,16 @@ func wireRepo(ctx context.Context, cfg config.Config) (repoEnv, error) {
 
 func (w repoEnv) frictionDeps() app.FrictionDeps {
 	return app.FrictionDeps{Forge: w.forge, Load: w.store.Answer, Save: w.store.SaveAnswer}
+}
+
+func (w repoEnv) shipDeps() app.ShipDeps {
+	v := vouch.Vouch{ReviewTimeout: w.cfg.ReviewTimeout.Duration, CallTimeout: w.cfg.CallTimeout.Duration}
+	return app.ShipDeps{
+		Forge: w.forge, Branch: w.git.Branch, Clean: w.git.Clean, Ahead: w.git.Ahead, HeadSHA: w.git.HeadSHA,
+		RemoteSHA: w.git.RemoteSHA, Push: w.git.Push, Subject: w.git.Subject, Review: v.Review, Answer: w.store.Answer,
+		RunCheck: func(ctx context.Context, dir, command string) error {
+			_, err := runner.Cmd(ctx, w.cfg.CheckTimeout.Duration, dir, nil, "sh", "-c", command)
+			return err
+		},
+	}
 }

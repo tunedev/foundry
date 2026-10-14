@@ -25,3 +25,5 @@ func retryOnce(ctx context.Context, pause time.Duration, fn func() error) error 
 	}
 	return fn()
 }
+
+func isTransient(err error) bool { return errors.Is(err, ports.ErrTransient) }

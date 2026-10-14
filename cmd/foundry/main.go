@@ -11,8 +11,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tunedev/foundry/internal/adapters/outbound/store"
 	"github.com/tunedev/foundry/internal/config"
 	"github.com/tunedev/foundry/internal/core/app"
 	"github.com/tunedev/foundry/internal/core/friction"
@@ -92,7 +94,42 @@ func openLogs(cfg config.Config) (*os.File, error) {
 }
 
 func cmdShip(ctx context.Context, cfg config.Config, args []string) int {
-	return usageErr(errors.New("ship is not built yet"))
+	fs := flag.NewFlagSet("ship", flag.ContinueOnError)
+	recapFile := fs.String("recap", "", "file holding the pull request's system recap")
+	title := fs.String("title", "", "pull request title; defaults to the HEAD commit subject")
+	if err := fs.Parse(args); err != nil {
+		return exitUsage
+	}
+	var recap string
+	if *recapFile != "" {
+		b, err := os.ReadFile(*recapFile)
+		if err != nil {
+			return usageErr(err)
+		}
+		recap = string(b)
+	}
+	w, err := wireRepo(ctx, cfg)
+	if err != nil {
+		return usageErr(err)
+	}
+	start := time.Now()
+	rep, err := app.Ship(ctx, w.shipDeps(), app.ShipInput{
+		Dir: w.dir, Repo: w.id, Base: w.repo.Base, Checks: w.repo.Checks, Recap: recap, Title: *title,
+		CITimeout: cfg.CITimeout.Duration, CIPoll: cfg.CIPoll.Duration, RetryPause: cfg.RetryPause.Duration,
+	})
+	for _, s := range rep.Passed {
+		fmt.Println("ok", s)
+	}
+	run := store.Run{Time: start, Kind: "ship", Repo: rep.Repo, Branch: rep.Branch, Step: rep.Step,
+		Outcome: outcome(err), PRURL: rep.PRURL, WallMS: time.Since(start).Milliseconds()}
+	if rerr := w.store.AppendRun(run); rerr != nil {
+		slog.ErrorContext(ctx, "run record not written", "error", rerr.Error())
+	}
+	if err != nil {
+		return stopWith(err)
+	}
+	fmt.Println("ready for human:", rep.PRURL)
+	return exitOK
 }
 
 func cmdFriction(ctx context.Context, cfg config.Config, args []string) int {
