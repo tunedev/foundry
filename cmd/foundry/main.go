@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -153,6 +154,9 @@ func cmdFriction(ctx context.Context, cfg config.Config, args []string) int {
 		reason := fs.String("reason", "", "why this branch hit no friction")
 		if err := fs.Parse(args[1:]); err != nil {
 			return exitUsage
+		}
+		if strings.TrimSpace(*reason) == "" {
+			return usageErr(errors.New("friction none: --reason is required"))
 		}
 		if err := app.NoFriction(w.frictionDeps(), w.id, branch, *reason); err != nil {
 			return stopWith(err)

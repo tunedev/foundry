@@ -358,6 +358,24 @@ func TestFrictionDoesNotDuplicateIssueWhenCreateResponseIsLost(t *testing.T) {
 	}
 }
 
+func TestFrictionNoneWithoutReasonIsAUsageError(t *testing.T) {
+	w := newWorld(t, "feat")
+	if _, errOut, code := w.foundry("friction", "none"); code != 2 || !strings.Contains(errOut, "--reason") {
+		t.Fatalf("code %d\n%s", code, errOut)
+	}
+}
+
+func TestFrictionRetryCommentsOnAnotherBranchsIssue(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.setGH(`{"issues":[{"number":1,"title":"Slow tests","labels":["friction"]}],
+		"fail_once":{"issue list":"HTTP 502: Bad Gateway (https://api.github.com/graphql)"}}`)
+	body := w.write(w.root, "f.md", goodFriction)
+	out, _, code := w.foundry("friction", "file", "--title", "Slow tests", "--body-file", body, "--kind", "ready")
+	if s := w.gh(); code != 0 || !strings.Contains(out, "#1") || len(s.Issues) != 1 || len(s.Comments) != 1 {
+		t.Fatalf("code %d\n%s\nstate %+v", code, out, s)
+	}
+}
+
 func TestShipStopsWithoutForcePushingADivergedBranch(t *testing.T) {
 	w := newWorld(t, "feat")
 	w.foundry("friction", "none", "--reason", "smooth run")
