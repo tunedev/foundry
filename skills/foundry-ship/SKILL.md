@@ -19,6 +19,8 @@ Run `foundry ship` from the repo. Read its last line, do what it says, and rerun
   - `Risk`: starts with `low`, `medium` or `high`, then one reason
   - `Verified`: commands run, with their output pasted
   - `Links`: issues closed, or `none`
+- `stop at push-pr` saying origin's branch has diverged: ask the user whether to overwrite it. Never
+  force-push.
 - `stop at friction`: report friction as below, then rerun.
 - `stop: transient failure`: rerun once; if it stops the same way, report the error to the user.
 
