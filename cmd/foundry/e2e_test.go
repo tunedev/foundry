@@ -300,11 +300,16 @@ func TestShipStopsAtVouchFindings(t *testing.T) {
 }
 
 func TestShipReportsAVouchRunErrorAsNotFindings(t *testing.T) {
-	w := newWorld(t, "feat")
-	w.write(w.root, "vouch-review-fail", "vouch: no review rules for github.com/acme/widget\n")
-	out, _, code := w.foundry("ship", "--recap", w.recap())
-	if code != 1 || !strings.Contains(out, "stop at review: vouch failed to run") || !strings.Contains(out, "no review rules") {
-		t.Fatalf("code %d\n%s", code, out)
+	for file, msg := range map[string]string{
+		"vouch-review-fail": "vouch: no review rules for github.com/acme/widget",
+		"vouch-gate-error":  "vouch: config: unreadable config.toml",
+	} {
+		w := newWorld(t, "feat")
+		w.write(w.root, file, msg+"\n")
+		out, _, code := w.foundry("ship", "--recap", w.recap())
+		if code != 1 || !strings.Contains(out, "stop at review: vouch failed to run") || !strings.Contains(out, msg) {
+			t.Fatalf("%s: code %d\n%s", file, code, out)
+		}
 	}
 }
 

@@ -1,12 +1,13 @@
 #!/bin/sh
 # Fake vouch. review fails with the contents of $FAKE_LOGS/vouch-review-fail on stderr when that file exists.
-# gate denies like vouch: the contents of $FAKE_LOGS/vouch-gate-fail on stderr, exit 2.
+# gate fails to run with the contents of $FAKE_LOGS/vouch-gate-error on stderr, exit 1, and denies like vouch: the contents of $FAKE_LOGS/vouch-gate-fail on stderr, exit 2.
 echo "$@" >> "$FAKE_LOGS/vouch.calls"
 case "$1" in
   review)
     if [ -f "$FAKE_LOGS/vouch-review-fail" ]; then cat "$FAKE_LOGS/vouch-review-fail" >&2; exit 1; fi
     exit 0 ;;
   gate)
+    if [ -f "$FAKE_LOGS/vouch-gate-error" ]; then cat "$FAKE_LOGS/vouch-gate-error" >&2; exit 1; fi
     if [ -f "$FAKE_LOGS/vouch-gate-fail" ]; then cat "$FAKE_LOGS/vouch-gate-fail" >&2; exit 2; fi
     exit 0 ;;
 esac
