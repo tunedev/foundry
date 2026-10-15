@@ -198,6 +198,7 @@ End to end, as in increment 1: real git against a local origin, fake `gh` and `v
 | Claim's PR closed unmerged | `friction:ready` replaced by `friction:needs-decision`, PR linked |
 | Relabelled ready after a rejected PR, new claim expires with no PR | released and picked again, not sent back to `needs-decision` |
 | Second `work` while one runs | exits at once, no writes |
+| `work.lock` left on disk by a killed run, with no holder | next `work` takes the lock and runs |
 | Nothing ready | no claims, no summary |
 | Rerun over finished issues | no remote writes |
 | Telemetry | in-memory exporter receives the span tree for one issue; ship spans parent under a given `TRACEPARENT` |
