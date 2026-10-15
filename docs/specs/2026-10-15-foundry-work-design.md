@@ -80,13 +80,18 @@ file allows one run at a time; a second start exits 0 and logs the skip.
    - it was closed without merging: the human turned the fix down, so `in-progress` is removed,
      the kind label `friction:ready` is replaced by `friction:needs-decision`, and a comment
      links the PR;
-   - that branch has no PR and the claim is older than `claim_lease` (default 2h): the label is
-     removed and a comment says so, so the issue can be picked again.
+   - that branch has no PR and the claim comment is older than `claim_lease` (default 2h): the
+     label is removed and a comment says so, so the issue can be picked again;
+   - there is no claim comment at all: the label is removed the same way.
+   Release is the only way a claimed issue returns to the queue.
    A merged PR closes the issue through `Closes #<n>`.
-2. **Pick.** Open `friction:ready` issues with no linked open PR and no `friction:stuck` label,
+2. **Pick.** Open `friction:ready` issues with no linked open PR and neither `friction:stuck` nor
+   `friction:in-progress`,
    ordered by hit count descending, then oldest first. Stop at `max_issues_per_run` (default 3)
    or when the window closes. Each issue is attempted at most once per run.
-3. **Claim.** Add `friction:in-progress` and a comment naming the run ID.
+3. **Claim.** Post a comment naming the run ID, then add `friction:in-progress`. In that order, a
+   crash between the two leaves an unlabelled issue that the next run can pick again, never a
+   labelled one with no claim to release.
 4. **Run**, one issue at a time, through `AgentRunner`:
    - Create a worktree from `origin/<base>` on `friction/<n>-<run id>`. Each attempt gets its own
      branch, so an issue picked again after a rejected PR, a release or a human relabel never
