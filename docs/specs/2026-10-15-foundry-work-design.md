@@ -75,8 +75,9 @@ A systemd user timer starts `foundry work` every 2 hours inside the configured w
 file allows one run at a time; a second start exits 0 and logs the skip.
 
 1. **Release claims.** For each issue labelled `friction:in-progress`:
-   - its `friction/<n>-*` PR was closed without merging: the human turned the fix down, so
-     `in-progress` is removed, `friction:needs-decision` added, and a comment links the PR;
+   - its newest `friction/<n>-*` PR was closed without merging: the human turned the fix down, so
+     `in-progress` is removed, the kind label `friction:ready` is replaced by
+     `friction:needs-decision`, and a comment links the PR;
    - no PR at all and the claim is older than `claim_lease` (default 2h): the label is removed
      and a comment says so, so the issue can be picked again.
    A merged PR closes the issue through `Closes #<n>`.
@@ -85,7 +86,9 @@ file allows one run at a time; a second start exits 0 and logs the skip.
    or when the window closes. Each issue is attempted at most once per run.
 3. **Claim.** Add `friction:in-progress` and a comment naming the run ID.
 4. **Run**, one issue at a time, through `AgentRunner`:
-   - Create a worktree from `origin/<base>` on `friction/<n>-<slug>`.
+   - Create a worktree from `origin/<base>` on `friction/<n>-<run id>`. Each attempt gets its own
+     branch, so an issue picked again after a rejected PR, a release or a human relabel never
+     collides with an earlier attempt's branch or PR. Earlier branches are left for the human.
    - Run `claude -p --output-format json --max-turns <max_turns>` with the agent environment.
      The prompt holds the issue body, the repo's `verify` commands, the instruction to finish by
      running `foundry ship` until it prints `ready for human` with `Closes #<n>` under the recap's
@@ -99,13 +102,15 @@ file allows one run at a time; a second start exits 0 and logs the skip.
    - Remove the worktree, whatever the outcome.
 5. **Summarise** through `Notifier`: issues picked, ready PR links, stuck issues with reasons,
    new `needs-decision` issues, total cost and wall time. A run that picked nothing sends nothing.
+   The webhook call uses `call_timeout` and one retry on a transient error; a failed summary is
+   logged and recorded on the trace, and never fails the run.
 
 ### Outcomes
 
 | Outcome | Detected by | Effect on the issue |
 |---|---|---|
 | `ready-for-human` | ship's record shows hand-off | PR linked; `in-progress` stays until the PR closes |
-| `needs-decision` | Claude's final result starts `NEEDS-DECISION:` | `in-progress` removed, `friction:needs-decision` added, recommendation commented |
+| `needs-decision` | Claude's final result starts `NEEDS-DECISION:` | `in-progress` removed, kind label `friction:ready` replaced by `friction:needs-decision`, recommendation commented |
 | `stuck` | anything else: timeout, turn limit, `max_review_rounds` (default 3) exhausted, a ship stop, a crash | `in-progress` removed, `friction:stuck` added, reason and last step commented |
 
 With the vouch policy above, `stop at review: vouch did not pass` always means findings at minor
@@ -162,7 +167,7 @@ run.
 ## Configuration
 
 Additions to `~/.foundry/config.toml`, with the increment 1 precedence and startup validation:
-the work window, `claim_lease`, `max_issues_per_run`, `issue_timeout`, `max_turns`,
+the work window, `call_timeout` for the notifier, `claim_lease`, `max_issues_per_run`, `issue_timeout`, `max_turns`,
 `max_review_rounds`, and the paths of the three secret files. Secrets are never logged and never
 written to the run record or telemetry.
 
