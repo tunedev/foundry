@@ -31,7 +31,9 @@ Three pieces, each its own pull request or checked setup:
    to the workstation stack. The collector sends metrics to Prometheus by remote write and traces
    to Tempo; Grafana gains Tempo as a data source and the foundry dashboard. Verified by a test
    span and a test metric reaching Grafana before foundry depends on it.
-2. **`foundry`: `foundry work`, the timer, the summary and telemetry**, as specified below.
+2. **`foundry`: `foundry work`, the timer, the summary and telemetry**, as specified below. The
+   README and `skills/foundry-ship/SKILL.md` document the new config keys and ship's
+   `review did not converge` stop.
 3. **Human setup**, guided and checked one step at a time:
    - Create `tunedev-foundry`; add it to atlas, foundry and `foundry-sandbox` with Write.
    - Protect `main` on each opted-in repo: one approving review required.
@@ -57,18 +59,27 @@ The agent never sees the human's home. Each run gets:
 - `HOME=~/.foundry/agent`, holding a git config with the bot's name and email and
   `core.hooksPath` set to vouch's githooks, so vouch's pre-push gate and review posting fire.
 - `GH_TOKEN` (the bot's), `CLAUDE_CODE_OAUTH_TOKEN`, `VOUCH_HOME` (the shared `~/.vouch`, so the
-  index and rules are not duplicated), `PATH`, and the `OTEL_*` variables below. Nothing else.
+  index and rules are not duplicated), `FOUNDRY_HOME` (the worker's `~/.foundry`, so the agent's
+  `foundry ship` writes the run record and friction answers the worker reads), `PATH`, and the
+  `OTEL_*` variables below. Nothing else.
 - A Claude Code settings file with the permission allowlist: edits inside the worktree; Bash
-  limited to `go`, `git`, `gh`, `foundry`, `vouch` and the repo's `verify` commands. The human's
-  hooks, MCP servers, plugins and `CLAUDE.md` do not load.
+  limited to `go`, `git`, `foundry`, `vouch` and the repo's `verify` commands. No `gh`: the agent
+  reaches GitHub only through `foundry`. The human's hooks, MCP servers, plugins and `CLAUDE.md`
+  do not load.
+- The `foundry-ship` skill, installed under the agent home, so the agent follows ship's stop
+  contract: recap headings, friction reports, never `vouch ack`.
 
 ## A `foundry work` run
 
 A systemd user timer starts `foundry work` every 2 hours inside the configured window. A lock
 file allows one run at a time; a second start exits 0 and logs the skip.
 
-1. **Release stale claims.** An issue labelled `friction:in-progress` for longer than
-   `claim_lease` (default 2h) with no open PR loses the label and gets a comment.
+1. **Release claims.** For each issue labelled `friction:in-progress`:
+   - its `friction/<n>-*` PR was closed without merging: the human turned the fix down, so
+     `in-progress` is removed, `friction:needs-decision` added, and a comment links the PR;
+   - no PR at all and the claim is older than `claim_lease` (default 2h): the label is removed
+     and a comment says so, so the issue can be picked again.
+   A merged PR closes the issue through `Closes #<n>`.
 2. **Pick.** Open `friction:ready` issues with no linked open PR and no `friction:stuck` label,
    ordered by hit count descending, then oldest first. Stop at `max_issues_per_run` (default 3)
    or when the window closes. Each issue is attempted at most once per run.
@@ -77,8 +88,11 @@ file allows one run at a time; a second start exits 0 and logs the skip.
    - Create a worktree from `origin/<base>` on `friction/<n>-<slug>`.
    - Run `claude -p --output-format json --max-turns <max_turns>` with the agent environment.
      The prompt holds the issue body, the repo's `verify` commands, the instruction to finish by
-     running `foundry ship` until it prints `ready for human`, and the instruction to reply
-     starting `NEEDS-DECISION:` with a recommendation when the fix is a product decision.
+     running `foundry ship` until it prints `ready for human` with `Closes #<n>` under the recap's
+     `Links`, and two unattended overrides to the skill:
+     - reply starting `NEEDS-DECISION:` with a recommendation when the fix is a product decision;
+     - wherever the skill says to report to or ask the user, stop and reply starting `STUCK:`
+       with the reason.
    - `issue_timeout` (default 45m) cancels the context that owns the process.
    - Read the outcome from evidence: the branch's latest `runs.jsonl` line written by ship, and
      cost, turns, model and session ID from Claude's JSON output.
@@ -96,7 +110,8 @@ file allows one run at a time; a second start exits 0 and logs the skip.
 
 With the vouch policy above, `stop at review: vouch did not pass` always means findings at minor
 or above, which the agent fixes. ship counts review rounds per branch and stops with
-`review did not converge` after `max_review_rounds`.
+`review did not converge` after `max_review_rounds`. The counter lives in foundry's local store,
+keyed by repo and branch, beside the friction answers.
 
 ### Failure isolation
 
