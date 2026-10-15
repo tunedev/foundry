@@ -71,8 +71,10 @@ The agent never sees the human's home. Each run gets:
 
 ## A `foundry work` run
 
-A systemd user timer starts `foundry work` every 2 hours inside the configured window. A lock
-file allows one run at a time; a second start exits 0 and logs the skip.
+A systemd user timer starts `foundry work` every 2 hours inside the configured window. An
+exclusive `flock` on `~/.foundry/work.lock` allows one run at a time; the kernel releases it when
+the process dies, so a killed run never blocks later ones. A second start exits 0 and logs the
+skip.
 
 1. **Release claims.** For each issue labelled `friction:in-progress`, the current claim is the
    newest claim comment; its run ID names the claim's branch, `friction/<n>-<run id>`. Only the
