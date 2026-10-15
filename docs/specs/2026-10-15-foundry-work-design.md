@@ -74,12 +74,14 @@ The agent never sees the human's home. Each run gets:
 A systemd user timer starts `foundry work` every 2 hours inside the configured window. A lock
 file allows one run at a time; a second start exits 0 and logs the skip.
 
-1. **Release claims.** For each issue labelled `friction:in-progress`:
-   - its newest `friction/<n>-*` PR was closed without merging: the human turned the fix down, so
-     `in-progress` is removed, the kind label `friction:ready` is replaced by
-     `friction:needs-decision`, and a comment links the PR;
-   - no PR at all and the claim is older than `claim_lease` (default 2h): the label is removed
-     and a comment says so, so the issue can be picked again.
+1. **Release claims.** For each issue labelled `friction:in-progress`, the current claim is the
+   newest claim comment; its run ID names the claim's branch, `friction/<n>-<run id>`. Only the
+   PR on that branch counts:
+   - it was closed without merging: the human turned the fix down, so `in-progress` is removed,
+     the kind label `friction:ready` is replaced by `friction:needs-decision`, and a comment
+     links the PR;
+   - that branch has no PR and the claim is older than `claim_lease` (default 2h): the label is
+     removed and a comment says so, so the issue can be picked again.
    A merged PR closes the issue through `Closes #<n>`.
 2. **Pick.** Open `friction:ready` issues with no linked open PR and no `friction:stuck` label,
    ordered by hit count descending, then oldest first. Stop at `max_issues_per_run` (default 3)
