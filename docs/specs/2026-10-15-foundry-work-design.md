@@ -191,6 +191,10 @@ End to end, as in increment 1: real git against a local origin, fake `gh` and `v
 | Review never converges | `stuck` after `max_review_rounds` with the last findings |
 | Issue 1 crashes | issue 2 still runs; summary shows both |
 | Expired claim with no PR | released with a comment, then picked in the same run |
+| Claim younger than `claim_lease` | neither released nor picked |
+| `in-progress` with no claim comment | released |
+| Claim's PR closed unmerged | `friction:ready` replaced by `friction:needs-decision`, PR linked |
+| Relabelled ready after a rejected PR, new claim expires with no PR | released and picked again, not sent back to `needs-decision` |
 | Second `work` while one runs | exits at once, no writes |
 | Nothing ready | no claims, no summary |
 | Rerun over finished issues | no remote writes |
