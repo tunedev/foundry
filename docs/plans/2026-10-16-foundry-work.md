@@ -15,8 +15,9 @@
 ## Decisions this plan adds to the spec
 
 - **Metrics reach Prometheus by scrape, not remote write.** The collector's `deltatocumulative` processor and `prometheus` exporter on `127.0.0.1:8889` join the existing scrape-job pattern and keep a counter whole across short-lived foundry processes. Remote write would forward each process's counter as a separate series that restarts from zero. Assertion a13 proves the sum.
-- **`foundry work` runs in a dedicated clone**, `~/.foundry/checkouts/<repo>`, one systemd template instance per repo. Your working copies are never touched.
+- **`foundry work` runs in a dedicated clone**, `~/.foundry/checkouts/<repo>`. One timer works every checkout in turn, so repos never race for the global lock. Your working copies are never touched.
 - **`agent_pass_env`** names extra variables the agent inherits. It is empty in production. The end-to-end fakes need `FAKE_STATE` and `FAKE_LOGS`.
+- **Only the bot's and the repo owner's issues are worked.** The issue body becomes the prompt, and the agent can read its own `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`, so a stranger's issue, or a stranger's later edit to it, must never reach the agent. A label is not enough of a gate, because the author can edit the body after you label it.
 - **The agent's deny list is advisory.** `Bash(gh:*)` and `Bash(git push:*)` stop the obvious calls, but `git -C . push --force` or a `go run` against the API would get past them. The controls that hold are on GitHub's side. The bot is a collaborator only on opted-in repos. `main` requires an approving review. A ruleset blocks force-pushes and deletions on every branch, so the bot can't rewrite one. A fine-grained token can't be scoped to repos where the bot is only a collaborator under a personal account, so the token is classic `repo`, and the collaborator list is the scope.
 - **The second arch test checks foundry's own packages only**, as its comment already says, because the OpenTelemetry API imports `os`. The first arch test now also bars the SDK and exporters from the core.
 
@@ -40,7 +41,7 @@
 ## Review Focus
 
 1. **A claim comment by someone other than the bot** on a public repo must not steer release. `CurrentClaim` reads only the bot's comments. Pinned in Task B3 (`TestCurrentClaimIgnoresOtherAuthors`).
-2. **The agent's grandchildren at timeout**: `foundry ship` waiting on CI under a killed `claude` must die too, or it keeps pushing after the issue is marked stuck. The runner kills the whole process group. Pinned in Task B6 (`TestRunKillsTheProcessGroupAtTimeout`).
+2. **The agent's grandchildren at timeout**: `foundry ship` waiting on CI under a killed `claude` must die too, or it keeps pushing after the issue is marked stuck. The runner kills the whole process group. Pinned in Task B8 (`TestWorkKillsHungAgent`).
 3. **The webhook URL in an error**: Go's HTTP errors quote the URL, and Discord's URL is the secret. Pinned in Task B7 (`TestNotifyNeverQuotesTheWebhookURL`).
 4. **A missing secret file** must stop `work` at startup with exit 2, naming the file and never printing a value. Pinned in Task B8 (`TestWorkFailsAtStartupWithoutASecretFile`).
 5. **A window that wraps midnight** (`22:00-07:00`) must be open at 23:30 and 06:59 and closed at 07:00. Pinned in Task B3 (`TestWindow`).
@@ -1079,7 +1080,7 @@ func countRound(ctx context.Context, d ShipDeps, in ShipInput, branch string) (s
 In `wire.go` `shipDeps`, add `Rounds: w.store.Rounds, SaveRounds: w.store.SaveRounds`. In `cmdShip`, pass `MaxReviewRounds: cfg.MaxReviewRounds` in `ShipInput`, and set `Detail: detail(err)` on the `store.Run`. Add to `main.go`:
 
 ```go
-// detail is the stop's text for the run record, at most 2000 bytes.
+// detail is the stop's text for the run record, at most 2000 bytes, cut on a character boundary.
 func detail(err error) string {
 	if err == nil {
 		return ""
@@ -1088,7 +1089,7 @@ func detail(err error) string {
 	if na, ok := errors.AsType[*app.NeedsAction](err); ok {
 		s = na.Detail
 	}
-	return s[:min(len(s), 2000)]
+	return strings.ToValidUTF8(s[:min(len(s), 2000)], "")
 }
 ```
 
@@ -1123,14 +1124,14 @@ git commit -m "Stop ship when review does not converge, and record each stop's d
 
 **Interfaces:**
 - Produces:
-  - `ports.Comment{Author, Body string; Trusted bool; CreatedAt time.Time}`; `Forge.IssueComments(ctx, dir string, number int) ([]Comment, error)`; `ports.Issue` gains `Body string; Labels []string; CreatedAt time.Time; Comments []Comment`; `ports.PR` gains `Head, State string`.
+  - `ports.Comment{Author, Body string; CreatedAt time.Time}`; `Forge.IssueComments(ctx, dir string, number int) ([]Comment, error)`; `ports.Issue` gains `Author, Body string; Labels []string; CreatedAt time.Time; Comments []Comment`; `ports.PR` gains `Head, State string`.
   - `ports.AgentJob{RepoDir, Base, Branch, Prompt string; Verify []string; MaxTurns int}`; `ports.AgentResult{Text, Subtype, SessionID, Model string; Turns int; CostUSD float64}`; `ports.AgentRunner` with `Run(ctx context.Context, job AgentJob) (AgentResult, error)`.
   - `ports.IssueReport{Number int; Title, URL, Outcome, Reason, PRURL, Detail string}`; `ports.Summary{RunID, Repo string; Issues []IssueReport; CostUSD float64; Wall time.Duration; Aborted string}`; `ports.Notifier` with `Notify(ctx context.Context, s Summary) error`.
   - `friction.InProgress = "friction:in-progress"`, `friction.Stuck = "friction:stuck"`, `friction.HitAgain = "Hit again from branch"`.
   - `work.Window`, `work.ParseWindow(s string) (Window, error)`, `(Window) Contains(t time.Time) bool`.
   - `work.ClaimComment(runID string) string`, `work.Claim{RunID string; At time.Time}`, `work.CurrentClaim(comments []ports.Comment, bot string) (Claim, bool)`, `work.Branch(issue int, runID string) string`.
   - `work.Release` with `Keep`, `Expired`, `NoClaim`, `Rejected`; `work.Decide(c Claim, claimed bool, pr ports.PR, found bool, now time.Time, lease time.Duration) Release`.
-  - `work.Hits(is ports.Issue) int`, `work.Pick(ready []ports.Issue, open []ports.PR, max int) []ports.Issue`.
+  - `work.Hits(is ports.Issue, trusted []string) int`, `work.Pick(ready []ports.Issue, open []ports.PR, max int, trusted []string) []ports.Issue`.
   - `work.ShipRecord{Step, Outcome, PRURL, Detail string}`, `work.Evidence{Result ports.AgentResult; RunErr error; TimedOut bool; Ship ShipRecord; Shipped bool}`, `work.Kind` (`ReadyForHuman`, `NeedsDecision`, `Stuck`), `work.Reason` (constants below), `work.Outcome{Kind Kind; Reason Reason; PRURL, Detail string}`, `work.Classify(e Evidence) Outcome`.
   - `work.Prompt(is ports.Issue, verify []string) string`.
 
@@ -1217,22 +1218,24 @@ func TestDecide(t *testing.T) {
 }
 
 func TestPickOrdersByHitsThenAgeAndSkipsTaken(t *testing.T) {
-	hit := ports.Comment{Body: "Hit again from branch `x`.", Trusted: true}
-	spam := ports.Comment{Body: "Hit again from branch `y`."}
+	trusted := []string{"bot", "owner"}
+	hit := ports.Comment{Author: "bot", Body: "Hit again from branch `x`."}
+	spam := ports.Comment{Author: "stranger", Body: "Hit again from branch `y`."}
 	ready := []ports.Issue{
-		{Number: 1, CreatedAt: t0, Labels: []string{"friction:ready"}},
-		{Number: 2, CreatedAt: t0.Add(time.Hour), Labels: []string{"friction:ready"}, Comments: []ports.Comment{hit, hit}},
-		{Number: 3, CreatedAt: t0.Add(-time.Hour), Labels: []string{"friction:ready"}},
-		{Number: 8, CreatedAt: t0.Add(2 * time.Hour), Labels: []string{"friction:ready"}, Comments: []ports.Comment{spam, spam, spam}},
-		{Number: 4, Labels: []string{"friction:ready", "friction:in-progress"}},
-		{Number: 5, Labels: []string{"friction:ready", "friction:stuck"}},
-		{Number: 6, Labels: []string{"friction:ready"}},
-		{Number: 7, Labels: []string{"friction:ready"}},
+		{Number: 1, Author: "owner", CreatedAt: t0, Labels: []string{"friction:ready"}},
+		{Number: 2, Author: "bot", CreatedAt: t0.Add(time.Hour), Labels: []string{"friction:ready"}, Comments: []ports.Comment{hit, hit}},
+		{Number: 3, Author: "owner", CreatedAt: t0.Add(-time.Hour), Labels: []string{"friction:ready"}},
+		{Number: 8, Author: "owner", CreatedAt: t0.Add(2 * time.Hour), Labels: []string{"friction:ready"}, Comments: []ports.Comment{spam, spam, spam}},
+		{Number: 9, Author: "stranger", CreatedAt: t0.Add(-5 * time.Hour), Labels: []string{"friction:ready"}},
+		{Number: 4, Author: "owner", Labels: []string{"friction:ready", "friction:in-progress"}},
+		{Number: 5, Author: "owner", Labels: []string{"friction:ready", "friction:stuck"}},
+		{Number: 6, Author: "owner", Labels: []string{"friction:ready"}},
+		{Number: 7, Author: "owner", Labels: []string{"friction:ready"}},
 	}
 	open := []ports.PR{{Head: "friction/6-20261015-020000"}, {Head: "fix-docs", Body: "Fixes #7"}}
-	got := Pick(ready, open, 3)
-	if Hits(ready[3]) != 1 {
-		t.Errorf("untrusted hit comments counted: %d", Hits(ready[3]))
+	got := Pick(ready, open, 3, trusted)
+	if Hits(ready[3], trusted) != 1 {
+		t.Errorf("untrusted hit comments counted: %d", Hits(ready[3], trusted))
 	}
 	var nums []int
 	for _, is := range got {
@@ -1293,10 +1296,8 @@ Expected: FAIL to compile (`undefined: ParseWindow`).
 In `ports.go`, add `"time"` to the imports, give `PR` the fields `Head string` and `State string` (`OPEN`, `CLOSED` or `MERGED`), and replace `Issue`:
 
 ```go
-// Comment is an issue comment. Trusted means its author owns the repo or collaborates on it.
 type Comment struct {
 	Author, Body string
-	Trusted      bool
 	CreatedAt    time.Time
 }
 
@@ -1304,6 +1305,7 @@ type Issue struct {
 	Number    int
 	Title     string
 	URL       string
+	Author    string
 	Body      string
 	Labels    []string
 	CreatedAt time.Time
@@ -1511,28 +1513,30 @@ import (
 )
 
 // Hits is how often the friction was reported: the filing plus each later report's comment by a trusted author.
-func Hits(is ports.Issue) int {
+func Hits(is ports.Issue, trusted []string) int {
 	n := 1
 	for _, c := range is.Comments {
-		if c.Trusted && strings.HasPrefix(c.Body, friction.HitAgain) {
+		if slices.Contains(trusted, c.Author) && strings.HasPrefix(c.Body, friction.HitAgain) {
 			n++
 		}
 	}
 	return n
 }
 
-// Pick returns up to max ready issues to work: not claimed, not stuck and without an open pull request
-// for them, most hits first, then oldest first.
-func Pick(ready []ports.Issue, open []ports.PR, max int) []ports.Issue {
+// Pick returns up to max ready issues to work: opened by a trusted author, not claimed, not stuck and
+// without an open pull request for them, most hits first, then oldest first. The issue body becomes the
+// agent's prompt, so an untrusted author's issue is never picked, whatever its labels.
+func Pick(ready []ports.Issue, open []ports.PR, max int, trusted []string) []ports.Issue {
 	var out []ports.Issue
 	for _, is := range ready {
-		if slices.Contains(is.Labels, friction.InProgress) || slices.Contains(is.Labels, friction.Stuck) || hasPR(is.Number, open) {
+		if !slices.Contains(trusted, is.Author) || slices.Contains(is.Labels, friction.InProgress) ||
+			slices.Contains(is.Labels, friction.Stuck) || hasPR(is.Number, open) {
 			continue
 		}
 		out = append(out, is)
 	}
 	slices.SortStableFunc(out, func(a, b ports.Issue) int {
-		if c := cmp.Compare(Hits(b), Hits(a)); c != 0 {
+		if c := cmp.Compare(Hits(b, trusted), Hits(a, trusted)); c != 0 {
 			return c
 		}
 		return a.CreatedAt.Compare(b.CreatedAt)
@@ -1798,7 +1802,7 @@ git commit -m "Add the work configuration keys and secret file paths"
 
 **Interfaces:**
 - Consumes: the `ports.Forge` additions from B3.
-- Produces: `run.CmdEnv(ctx, timeout, dir string, extra []string, stdin io.Reader, name string, args ...string) ([]byte, error)`; `github.GitHub.Token string`; real `BranchPR`, `OpenPRs`, `EditLabels`, `IssueComments`; `OpenIssues` fills `Body`, `Labels`, `CreatedAt`, `Comments` (with `Trusted` from `authorAssociation`). Fake gh state gains `issues[].created_at`, `comments[].author`, `comments[].association` (default `COLLABORATOR`), `comments[].created_at`, `prs[].state`, `user` (default `foundry-bot`), and handles `issue edit`, `issue view --json comments`, and `pr list` without `--head` or with `--state all`.
+- Produces: `run.CmdEnv(ctx, timeout, dir string, extra []string, stdin io.Reader, name string, args ...string) ([]byte, error)`; `github.GitHub.Token string`; real `BranchPR`, `OpenPRs`, `EditLabels`, `IssueComments`; `OpenIssues` fills `Author`, `Body`, `Labels`, `CreatedAt`, `Comments`. Fake gh state gains `issues[].created_at`, `issues[].author` (default `acme`, the owner in the e2e repo `acme/widget`), `comments[].author`, `comments[].created_at`, `prs[].state`, `user` (default `foundry-bot`), and handles `issue edit`, `issue view --json comments`, and `pr list` without `--head` or with `--state all`.
 
 - [ ] **Step 1: Pass the bot token explicitly**
 
@@ -1904,18 +1908,18 @@ func (g GitHub) EditLabels(ctx context.Context, dir string, number int, add, rem
 	return err
 }
 
+type author struct {
+	Login string `json:"login"`
+}
+
 type commentJSON struct {
-	Author struct {
-		Login string `json:"login"`
-	} `json:"author"`
-	AuthorAssociation string    `json:"authorAssociation"`
-	Body              string    `json:"body"`
-	CreatedAt         time.Time `json:"createdAt"`
+	Author    author    `json:"author"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 func (c commentJSON) comment() ports.Comment {
-	trusted := c.AuthorAssociation == "OWNER" || c.AuthorAssociation == "MEMBER" || c.AuthorAssociation == "COLLABORATOR"
-	return ports.Comment{Author: c.Author.Login, Body: c.Body, Trusted: trusted, CreatedAt: c.CreatedAt}
+	return ports.Comment{Author: c.Author.Login, Body: c.Body, CreatedAt: c.CreatedAt}
 }
 
 func (g GitHub) IssueComments(ctx context.Context, dir string, number int) ([]ports.Comment, error) {
@@ -1937,6 +1941,7 @@ func (g GitHub) IssueComments(ctx context.Context, dir string, number int) ([]po
 }
 
 type issueJSON struct {
+	Author    author    `json:"author"`
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
 	URL       string    `json:"url"`
@@ -1950,7 +1955,7 @@ type issueJSON struct {
 
 func (g GitHub) OpenIssues(ctx context.Context, dir, label string) ([]ports.Issue, error) {
 	out, err := g.gh(ctx, dir, "", "issue", "list", "--label", label, "--state", "open",
-		"--json", "number,title,url,body,createdAt,labels,comments", "--limit", "500")
+		"--json", "number,title,url,author,body,createdAt,labels,comments", "--limit", "500")
 	if err != nil {
 		return nil, err
 	}
@@ -1960,7 +1965,7 @@ func (g GitHub) OpenIssues(ctx context.Context, dir, label string) ([]ports.Issu
 	}
 	issues := make([]ports.Issue, len(raw))
 	for i, r := range raw {
-		is := ports.Issue{Number: r.Number, Title: r.Title, URL: r.URL, Body: r.Body, CreatedAt: r.CreatedAt}
+		is := ports.Issue{Number: r.Number, Title: r.Title, URL: r.URL, Author: r.Author.Login, Body: r.Body, CreatedAt: r.CreatedAt}
 		for _, l := range r.Labels {
 			is.Labels = append(is.Labels, l.Name)
 		}
@@ -1977,7 +1982,7 @@ Delete the B3 stubs.
 
 - [ ] **Step 3: Extend the fake**
 
-In `fakegh/main.go`: add `State string \`json:"state"\`` to `pr`; `CreatedAt string \`json:"created_at"\`` to `issue`; `Author string \`json:"author"\``, `Association string \`json:"association"\`` and `CreatedAt string \`json:"created_at"\`` to `comment`; `User string \`json:"user"\`` to `state`. Add imports `cmp` and `time`. Replace the `pr list`, `issue list` and `issue comment` cases and add `issue edit`:
+In `fakegh/main.go`: add `State string \`json:"state"\`` to `pr`; `CreatedAt string \`json:"created_at"\`` to `issue`; `Author string \`json:"author"\`` and `CreatedAt string \`json:"created_at"\`` to `comment`; `Author string \`json:"author"\`` to `issue`; `User string \`json:"user"\`` to `state`. Add imports `cmp` and `time`. Replace the `pr list`, `issue list` and `issue comment` cases and add `issue edit`:
 
 ```go
 	case "pr list":
@@ -2010,6 +2015,7 @@ In `fakegh/main.go`: add `State string \`json:"state"\`` to `pr`; `CreatedAt str
 				}
 			}
 			out = append(out, map[string]any{"number": is.Number, "title": is.Title, "url": is.URL, "body": is.Body,
+				"author": map[string]any{"login": cmp.Or(is.Author, "acme")},
 				"createdAt": cmp.Or(is.CreatedAt, "2026-01-01T00:00:00Z"), "labels": labels, "comments": comments})
 		}
 		printJSON(out)
@@ -2047,8 +2053,7 @@ Also set `CreatedAt: time.Now().UTC().Format(time.RFC3339)` in the `issue create
 
 ```go
 func commentOut(c comment) map[string]any {
-	return map[string]any{"author": map[string]any{"login": c.Author}, "authorAssociation": cmp.Or(c.Association, "COLLABORATOR"),
-		"body": c.Body, "createdAt": c.CreatedAt}
+	return map[string]any{"author": map[string]any{"login": c.Author}, "body": c.Body, "createdAt": c.CreatedAt}
 }
 ``` Update the package comment to list `issue edit` and the `user` field.
 
@@ -2076,163 +2081,32 @@ git commit -m "Read labels, comments and pull request states from GitHub, and ed
 - Consumes: `ports.AgentRunner`, `ports.AgentJob`, `ports.AgentResult` (B3); `telemetry.Env` (B1); `run.Cmd`, `run.Classify`.
 - Produces: `run.Group(ctx context.Context, dir string, env []string, stdin io.Reader, name string, args ...string) ([]byte, error)`; `skills.FoundryShip []byte`; `claude.Runner{Bin, WorktreeRoot string; GitTimeout time.Duration; Env []string}` implementing `ports.AgentRunner`; `claude.Home{BotName, BotEmail, HooksPath string; Verify []string}`; `claude.PrepareHome(dir string, h Home) error`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
-Create `internal/adapters/outbound/claude/claude_test.go`:
+The runner's behaviour (worktree, exact environment, group kill at timeout, cleanup) is pinned end to end by the B8 work tests through the built binary. Only `parse`, a pure function, gets a unit test. Create `internal/adapters/outbound/claude/claude_test.go`:
 
 ```go
 package claude
 
-import (
-	"encoding/json"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"slices"
-	"strconv"
-	"strings"
-	"syscall"
-	"testing"
-	"time"
+import "testing"
 
-	"github.com/tunedev/foundry/internal/core/ports"
-)
-
-// repo makes an origin with one commit on main and a clone of it, and returns the clone.
-func repo(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	run := func(dir string, args ...string) {
-		c := exec.Command("git", args...)
-		c.Dir = dir
-		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-		if out, err := c.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+func TestParse(t *testing.T) {
+	r, err := parse([]byte(`{"type":"result","subtype":"success","result":"done","session_id":"s1","num_turns":4,"total_cost_usd":0.5,"modelUsage":{"m2":{},"m1":{}}}`))
+	if err != nil || r.Text != "done" || r.SessionID != "s1" || r.Turns != 4 || r.CostUSD != 0.5 || r.Model != "m1,m2" {
+		t.Fatalf("%+v %v", r, err)
 	}
-	seed, origin, clone := filepath.Join(root, "seed"), filepath.Join(root, "origin.git"), filepath.Join(root, "clone")
-	run(root, "init", "-q", "-b", "main", seed)
-	os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a\n"), 0o644)
-	run(seed, "add", ".")
-	run(seed, "commit", "-qm", "seed")
-	run(root, "clone", "-q", "--bare", seed, origin)
-	run(root, "clone", "-q", origin, clone)
-	return clone
-}
-
-// fake writes a stand-in claude script and returns its path. The script records its environment and
-// working directory under out, then runs body.
-func fake(t *testing.T, out, body string) string {
-	p := filepath.Join(t.TempDir(), "claude")
-	script := "#!/bin/sh\nenv > " + out + "/env\npwd > " + out + "/pwd\ngit branch --show-current > " + out + "/branch\ncat > " + out + "/prompt\n" + body
-	os.WriteFile(p, []byte(script), 0o755)
-	return p
-}
-
-const success = `{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s1","num_turns":4,"total_cost_usd":0.5,"modelUsage":{"m1":{}}}`
-
-func runner(t *testing.T, bin string) Runner {
-	return Runner{Bin: bin, WorktreeRoot: filepath.Join(t.TempDir(), "wt"), GitTimeout: time.Minute,
-		Env: []string{"HOME=/agent", "PATH=" + os.Getenv("PATH"), "GH_TOKEN=x"}}
-}
-
-func job(dir string) ports.AgentJob {
-	return ports.AgentJob{RepoDir: dir, Base: "main", Branch: "friction/1-r1", Prompt: "fix #1", MaxTurns: 9}
-}
-
-func TestRunGivesTheAgentAFreshWorktreeAndOnlyItsEnv(t *testing.T) {
-	dir, out := repo(t), t.TempDir()
-	r := runner(t, fake(t, out, "echo '"+success+"'\n"))
-	res, err := r.Run(t.Context(), job(dir))
-	if err != nil || res.Text != "done" || res.SessionID != "s1" || res.Turns != 4 || res.CostUSD != 0.5 || res.Model != "m1" {
-		t.Fatalf("%+v %v", res, err)
+	r, err = parse([]byte(`{"type":"result","subtype":"error_max_turns","is_error":true,"result":null,"num_turns":10}`))
+	if err != nil || r.Subtype != "error_max_turns" || r.Text != "" {
+		t.Fatalf("max turns: %+v %v", r, err)
 	}
-	read := func(f string) string { b, _ := os.ReadFile(filepath.Join(out, f)); return strings.TrimSpace(string(b)) }
-	if read("branch") != "friction/1-r1" || read("prompt") != "fix #1" || !strings.HasPrefix(read("pwd"), r.WorktreeRoot) {
-		t.Fatalf("branch %q prompt %q pwd %q", read("branch"), read("prompt"), read("pwd"))
-	}
-	var names []string
-	for _, kv := range strings.Split(read("env"), "\n") {
-		name, _, _ := strings.Cut(kv, "=")
-		if !slices.Contains([]string{"PWD", "SHLVL", "_", "OLDPWD"}, name) {
-			names = append(names, name)
-		}
-	}
-	slices.Sort(names)
-	if !slices.Equal(names, []string{"GH_TOKEN", "HOME", "PATH"}) {
-		t.Fatalf("agent env names %v", names)
-	}
-	if entries, _ := os.ReadDir(r.WorktreeRoot); len(entries) != 0 {
-		t.Fatalf("worktree left behind: %v", entries)
-	}
-}
-
-func TestRunReadsMaxTurnsFromAFailingExit(t *testing.T) {
-	dir, out := repo(t), t.TempDir()
-	r := runner(t, fake(t, out, `echo '{"type":"result","subtype":"error_max_turns","is_error":true,"result":null,"num_turns":10}'`+"\nexit 1\n"))
-	res, err := r.Run(t.Context(), job(dir))
-	if err != nil || res.Subtype != "error_max_turns" || res.Turns != 10 {
-		t.Fatalf("%+v %v", res, err)
-	}
-}
-
-func TestRunReportsACrashWithStderr(t *testing.T) {
-	dir, out := repo(t), t.TempDir()
-	r := runner(t, fake(t, out, "echo 'panic: boom' >&2\nexit 3\n"))
-	if _, err := r.Run(t.Context(), job(dir)); err == nil || !strings.Contains(err.Error(), "panic: boom") {
-		t.Fatalf("err %v", err)
-	}
-}
-
-func TestRunKillsTheProcessGroupAtTimeout(t *testing.T) {
-	dir, out := repo(t), t.TempDir()
-	r := runner(t, fake(t, out, "sleep 300 &\necho $! > "+out+"/child\nsleep 300\n"))
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	if _, err := r.Run(ctx, job(dir)); err == nil {
-		t.Fatal("hung agent returned no error")
-	}
-	b, _ := os.ReadFile(filepath.Join(out, "child"))
-	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	deadline := time.Now().Add(3 * time.Second)
-	for syscall.Kill(pid, 0) == nil {
-		if time.Now().After(deadline) {
-			t.Fatalf("child %d still running", pid)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if entries, _ := os.ReadDir(r.WorktreeRoot); len(entries) != 0 {
-		t.Fatalf("worktree left behind: %v", entries)
-	}
-}
-
-func TestPrepareHomeWritesSkillSettingsAndGitConfig(t *testing.T) {
-	home := t.TempDir()
-	if err := PrepareHome(home, Home{BotName: "bot", BotEmail: "b@x", HooksPath: "/v/githooks", Verify: []string{"go test -race ./..."}}); err != nil {
-		t.Fatal(err)
-	}
-	git, _ := os.ReadFile(filepath.Join(home, ".gitconfig"))
-	if !strings.Contains(string(git), "hooksPath = /v/githooks") || !strings.Contains(string(git), "name = bot") {
-		t.Fatalf("gitconfig:\n%s", git)
-	}
-	var s struct {
-		Permissions struct{ Allow, Deny []string } `json:"permissions"`
-	}
-	b, _ := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if err := json.Unmarshal(b, &s); err != nil || !slices.Contains(s.Permissions.Deny, "Bash(gh:*)") ||
-		!slices.Contains(s.Permissions.Allow, "Bash(go test -race ./...)") {
-		t.Fatalf("settings %s %v", b, err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".claude", "skills", "foundry-ship", "SKILL.md")); err != nil {
-		t.Fatal(err)
+	if _, err := parse([]byte("panic: boom")); err == nil {
+		t.Fatal("junk parsed")
 	}
 }
 ```
 
-Add `"context"` to the test imports.
-
 Run: `go test ./internal/adapters/outbound/claude -v`
-Expected: FAIL to compile (`undefined: Runner`).
+Expected: FAIL to compile (`undefined: parse`).
 
 - [ ] **Step 2: Embed the skill**
 
@@ -2489,7 +2363,7 @@ func bashRules(cmds []string) []string {
 - [ ] **Step 6: Run the tests**
 
 Run: `go vet ./... && go test ./...`
-Expected: PASS, the five claude tests included.
+Expected: PASS. The runner's behaviour is exercised from B8 onwards.
 
 - [ ] **Step 7: Commit**
 
@@ -2687,7 +2561,7 @@ git commit -m "Send run summaries to a Discord webhook"
 
 **Interfaces:**
 - Consumes: everything in B2 to B7.
-- Produces: `app.WorkDeps{Forge ports.Forge; Agent ports.AgentRunner; Notifier ports.Notifier; LastShip func(repo, branch string) (work.ShipRecord, bool, error); Now func() time.Time}`; `app.WorkInput{Dir, Repo, Base, RunID, Bot string; Verify, UserDataPaths []string; Window work.Window; ClaimLease, IssueTimeout, RetryPause time.Duration; MaxIssues, MaxTurns int}`; `app.Work(ctx, WorkDeps, WorkInput) (ports.Summary, error)`; e2e helpers `newWorkWorld(t) *world`, `(*world).work() (string, string, int)`, `(*world).scenario(issue int, name string)`, `(*world).discordBodies() []string`.
+- Produces: `app.WorkDeps{Forge ports.Forge; Agent ports.AgentRunner; Notifier ports.Notifier; LastShip func(repo, branch string) (work.ShipRecord, bool, error); Now func() time.Time}`; `app.WorkInput{Dir, Repo, Base, RunID, Bot string; Verify, UserDataPaths, Trusted []string; Window work.Window; ClaimLease, IssueTimeout, RetryPause time.Duration; MaxIssues, MaxTurns int}`; `app.Work(ctx, WorkDeps, WorkInput) (ports.Summary, error)`; e2e helpers `newWorkWorld(t) *world`, `(*world).work() (string, string, int)`, `(*world).scenario(issue int, name string)`, `(*world).discordBodies() []string`.
 
 - [ ] **Step 1: Build the fake claude**
 
@@ -2946,6 +2820,9 @@ func TestWorkShipsReadyIssueToHandOff(t *testing.T) {
 	if d := w.discordBodies(); len(d) != 1 || !strings.Contains(d[0], "pull/1") {
 		t.Fatalf("discord %q", d)
 	}
+	if b, _ := os.ReadFile(filepath.Join(w.home, "agent", ".claude", "settings.json")); !strings.Contains(string(b), `"Bash(gh:*)"`) {
+		t.Fatalf("agent settings do not deny gh:\n%s", b)
+	}
 	if entries, _ := os.ReadDir(filepath.Join(w.home, "worktrees")); len(entries) != 0 {
 		t.Fatalf("worktrees left: %v", entries)
 	}
@@ -3029,6 +2906,14 @@ func TestWorkReleasesExpiredClaimThenPicksIt(t *testing.T) {
 	cs := w.comments(1)
 	if len(cs) < 3 || !strings.Contains(cs[1], "expired") || !strings.HasPrefix(cs[2], "foundry: claimed by run ") || len(w.gh().PRs) != 1 {
 		t.Fatalf("comments %q prs %d", cs, len(w.gh().PRs))
+	}
+}
+
+func TestWorkNeverPicksAnUntrustedAuthorsIssue(t *testing.T) {
+	w := newWorkWorld(t)
+	w.setGH(`{"issues":[{"number":1,"title":"Issue 1","author":"stranger","labels":["friction","friction:ready"]}]}`)
+	if _, _, code := w.work(); code != 0 || w.gh().Writes != 0 || len(w.discordBodies()) != 0 {
+		t.Fatalf("code %d writes %d", code, w.gh().Writes)
 	}
 }
 
@@ -3191,7 +3076,7 @@ type WorkDeps struct {
 
 type WorkInput struct {
 	Dir, Repo, Base, RunID, Bot          string
-	Verify, UserDataPaths                []string
+	Verify, UserDataPaths, Trusted       []string
 	Window                               work.Window
 	ClaimLease, IssueTimeout, RetryPause time.Duration
 	MaxIssues, MaxTurns                  int
@@ -3291,7 +3176,7 @@ func pick(ctx context.Context, d WorkDeps, in WorkInput) ([]ports.Issue, error) 
 	if err := retryOnce(ctx, in.RetryPause, func() (err error) { open, err = d.Forge.OpenPRs(ctx, in.Dir); return err }); err != nil {
 		return nil, err
 	}
-	return work.Pick(ready, open, in.MaxIssues), nil
+	return work.Pick(ready, open, in.MaxIssues, in.Trusted), nil
 }
 
 // relabel comments, then edits labels, each retried once on a transient failure. A crash between the two
@@ -3366,12 +3251,13 @@ func applyOutcome(ctx context.Context, d WorkDeps, in WorkInput, n int, o work.O
 		[]string{friction.Stuck}, []string{friction.InProgress})
 }
 
-// publicSafe returns text for a public comment, at most 4000 bytes, or a note that it was withheld.
+// publicSafe returns text for a public comment, at most 4000 bytes cut on a character boundary, or a note
+// that it was withheld.
 func publicSafe(text string, userDataPaths []string) string {
 	if why := friction.Unsafe(text, userDataPaths); len(why) > 0 {
 		return "Details withheld: not public-safe (" + strings.Join(why, ", ") + "). See the run's trace."
 	}
-	return text[:min(len(text), 4000)]
+	return strings.ToValidUTF8(text[:min(len(text), 4000)], "")
 }
 ```
 
@@ -3440,6 +3326,7 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 	window, _ := cfg.Window()
 	s, err := app.Work(ctx, w.workDeps(sec, agentEnv(cfg, sec, agentHome, vouchHome, os.Getenv)), app.WorkInput{
 		Dir: w.dir, Repo: w.id, Base: w.repo.Base, RunID: time.Now().UTC().Format("20060102-150405"), Bot: cfg.BotName,
+		Trusted: []string{cfg.BotName, owner(w.id)},
 		Verify: w.repo.Verify, UserDataPaths: cfg.UserDataPaths, Window: window, ClaimLease: cfg.ClaimLease.Duration,
 		IssueTimeout: cfg.IssueTimeout.Duration, RetryPause: cfg.RetryPause.Duration, MaxIssues: cfg.MaxIssuesPerRun, MaxTurns: cfg.MaxTurns,
 	})
@@ -3450,6 +3337,12 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 		return stopWith(err)
 	}
 	return exitOK
+}
+
+// owner is the account that owns repo id owner/name.
+func owner(id string) string {
+	o, _, _ := strings.Cut(id, "/")
+	return o
 }
 
 // lockWork takes an exclusive, non-blocking flock on path; held reports that another process has it. The
@@ -3651,35 +3544,36 @@ git commit -m "Record outcome, cost, review-round and friction metrics, and trac
 ### Task B10: Timer, README and skill
 
 **Files:**
-- Create: `deploy/systemd/foundry-work@.service`, `deploy/systemd/foundry-work@.timer`
+- Create: `deploy/systemd/foundry-work.service`, `deploy/systemd/foundry-work.timer`
 - Modify: `Makefile`, `README.md`, `skills/foundry-ship/SKILL.md`
 
 **Interfaces:**
 - Consumes: `foundry work` from B8.
-- Produces: `make install-timer`; units run `foundry work` in `~/.foundry/checkouts/<instance>`.
+- Produces: `make install-timer`; one unit that runs `foundry work` in each `~/.foundry/checkouts/*` in turn.
 
 - [ ] **Step 1: Write the units**
 
-`deploy/systemd/foundry-work@.service`:
+One unit works every checkout in turn, so repos never race for the global lock and none is starved. While a run is still going, systemd does not start the oneshot unit again.
+
+`deploy/systemd/foundry-work.service`:
 
 ```ini
 [Unit]
-Description=foundry work on %i
+Description=foundry work on each checkout in ~/.foundry/checkouts, in turn
 After=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/.foundry/checkouts/%i
 Environment=PATH=%h/.local/bin:%h/forge/vouch/bin:/usr/local/go/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/foundry work
-TimeoutStartSec=4h
+ExecStart=/bin/sh -c 'for d in %h/.foundry/checkouts/*/; do (cd "$$d" && foundry work); done'
+TimeoutStartSec=12h
 ```
 
-`deploy/systemd/foundry-work@.timer`:
+`deploy/systemd/foundry-work.timer`:
 
 ```ini
 [Unit]
-Description=Start foundry work on %i every 2 hours
+Description=Start foundry work every 2 hours
 
 [Timer]
 OnCalendar=*-*-* 00/2:00:00
@@ -3696,17 +3590,17 @@ UNITS := $(HOME)/.config/systemd/user
 
 install-timer:
 	mkdir -p $(UNITS)
-	cp deploy/systemd/foundry-work@.service deploy/systemd/foundry-work@.timer $(UNITS)/
+	cp deploy/systemd/foundry-work.service deploy/systemd/foundry-work.timer $(UNITS)/
 	systemctl --user daemon-reload
-	@echo "enable with: systemctl --user enable --now foundry-work@<checkout>.timer"
+	@echo "enable with: systemctl --user enable --now foundry-work.timer"
 ```
 
 Add `install-timer` to `.PHONY`.
 
 - [ ] **Step 2: Check the units**
 
-Run: `systemd-analyze --user verify deploy/systemd/foundry-work@.service deploy/systemd/foundry-work@.timer`
-Expected: no output, or warnings only about the instance name, which is unset here.
+Run: `systemd-analyze --user verify deploy/systemd/foundry-work.service deploy/systemd/foundry-work.timer`
+Expected: no output.
 
 - [ ] **Step 3: README and skill**
 
@@ -3715,13 +3609,14 @@ In `README.md`, add `foundry work` to Commands, and add a section:
 ```markdown
 ## Unattended work
 
-`foundry work` runs in a dedicated clone at `~/.foundry/checkouts/<name>`. It releases expired claims,
-picks up to `max_issues_per_run` `friction:ready` issues, and runs `claude -p` on each in a fresh worktree
-as the bot, under `~/.foundry/agent`. Each issue ends `ready-for-human`, `needs-decision` or `stuck`, and the
-run summary goes to Discord. One run at a time; a second exits at once.
+`foundry work` runs in a dedicated clone under `~/.foundry/checkouts/`. It releases expired claims, picks up
+to `max_issues_per_run` `friction:ready` issues opened by the bot or the repo owner, and runs `claude -p` on
+each in a fresh worktree as the bot, under `~/.foundry/agent`. Each issue ends `ready-for-human`,
+`needs-decision` or `stuck`, and the run summary goes to Discord. One run at a time; a second exits at once.
+The timer works every checkout in turn, every 2 hours.
 
     make install-timer
-    systemctl --user enable --now foundry-work@<name>.timer
+    systemctl --user enable --now foundry-work.timer
 
 Needs `bot_name`, `bot_email` and the secret files `github_token_file`, `claude_token_file`,
 `discord_webhook_file` (defaults under `~/.foundry/secrets/`), and `loginctl enable-linger`.
@@ -3775,7 +3670,7 @@ Write `docs/notes/2026-10-16-increment-2.md` with the four Tenet 8 headings from
 
 - [ ] **Step 4: Atlas (spec success 3)**
 
-`git clone https://github.com/tunedev/atlas ~/.foundry/checkouts/atlas`, then `systemctl --user enable --now foundry-work@atlas.timer`. Success is one real atlas friction issue reaching a green bot PR overnight with no human action between.
+`git clone https://github.com/tunedev/atlas ~/.foundry/checkouts/atlas`, then `systemctl --user enable --now foundry-work.timer`. Success is one real atlas friction issue reaching a green bot PR overnight with no human action between.
 
 ---
 
