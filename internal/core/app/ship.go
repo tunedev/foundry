@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -142,25 +143,16 @@ func review(ctx context.Context, d ShipDeps, in ShipInput, branch string) error 
 	return needs("review", "vouch failed to run; report this error to the user:\n%v", err)
 }
 
-// findingAttrs is the review round and the count of findings per severity, read from the leading word of
-// each findings line.
+// findingAttrs is the review round and the count of findings per severity, in severity order.
 func findingAttrs(round int, err error) []attribute.KeyValue {
-	counts := map[string]int{}
-	for _, line := range strings.Split(err.Error(), "\n") {
-		if w, _, _ := strings.Cut(strings.TrimSpace(line), " "); slices.Contains(severities, strings.ToLower(w)) {
-			counts[strings.ToLower(w)]++
-		}
-	}
 	attrs := []attribute.KeyValue{attribute.Int("round", round)}
-	for _, sev := range severities {
-		if n := counts[sev]; n > 0 {
-			attrs = append(attrs, attribute.Int("findings."+sev, n))
+	if fe, ok := errors.AsType[*ports.FindingsError](err); ok {
+		for _, sev := range slices.Sorted(maps.Keys(fe.Counts)) {
+			attrs = append(attrs, attribute.Int("findings."+sev, fe.Counts[sev]))
 		}
 	}
 	return attrs
 }
-
-var severities = []string{"blocker", "critical", "major", "minor", "nit"}
 
 // countRound adds one review round for branch unless HEAD is the commit the last round already counted.
 func countRound(ctx context.Context, d ShipDeps, in ShipInput, branch string) (ship.Rounds, error) {

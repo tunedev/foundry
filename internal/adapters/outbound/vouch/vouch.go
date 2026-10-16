@@ -4,8 +4,9 @@ package vouch
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os/exec"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/tunedev/foundry/internal/core/ports"
@@ -22,7 +23,7 @@ func (v Vouch) Review(ctx context.Context, dir string) error {
 	}
 	_, err := run.Cmd(ctx, v.CallTimeout, dir, nil, "vouch", "gate")
 	if e, ok := errors.AsType[*run.Error](err); ok && exitCode(e) == 2 {
-		return fmt.Errorf("%w:\n%s", ports.ErrFindings, e.Stderr)
+		return &ports.FindingsError{Counts: severityCounts(e.Stderr), Text: e.Stderr}
 	}
 	return run.Classify(err)
 }
@@ -32,4 +33,18 @@ func exitCode(e *run.Error) int {
 		return x.ExitCode()
 	}
 	return -1
+}
+
+var severities = []string{"blocker", "critical", "major", "minor", "nit"}
+
+// severityCounts counts the unindented lines of vouch's findings that start with a severity word.
+func severityCounts(stderr string) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(stderr, "\n") {
+		w, _, _ := strings.Cut(line, " ")
+		if w = strings.ToLower(w); slices.Contains(severities, w) {
+			counts[w]++
+		}
+	}
+	return counts
 }

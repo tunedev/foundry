@@ -16,6 +16,17 @@ var ErrDiverged = errors.New("remote branch has diverged")
 // ErrFindings marks a review gate that denied the code. Its message carries the findings.
 var ErrFindings = errors.New("review findings")
 
+// FindingsError is a review gate denial: Text is what the reviewer printed and Counts the findings per
+// severity. It matches ErrFindings.
+type FindingsError struct {
+	Counts map[string]int
+	Text   string
+}
+
+func (e *FindingsError) Error() string { return ErrFindings.Error() + ":\n" + e.Text }
+
+func (e *FindingsError) Is(target error) bool { return target == ErrFindings }
+
 type PR struct {
 	Number  int
 	URL     string
