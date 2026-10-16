@@ -17,6 +17,7 @@
 - **Metrics reach Prometheus by scrape, not remote write.** The collector's `deltatocumulative` processor and `prometheus` exporter on `127.0.0.1:8889` join the existing scrape-job pattern and keep a counter whole across short-lived foundry processes. Remote write would forward each process's counter as a separate series that restarts from zero. Assertion a13 proves the sum.
 - **`foundry work` runs in a dedicated clone**, `~/.foundry/checkouts/<repo>`, one systemd template instance per repo. Your working copies are never touched.
 - **`agent_pass_env`** names extra variables the agent inherits. It is empty in production. The end-to-end fakes need `FAKE_STATE` and `FAKE_LOGS`.
+- **The agent's deny list is advisory.** `Bash(gh:*)` and `Bash(git push:*)` stop the obvious calls, but `git -C . push --force` or a `go run` against the API would get past them. The controls that hold are on GitHub's side. The bot is a collaborator only on opted-in repos. `main` requires an approving review. A ruleset blocks force-pushes and deletions on every branch, so the bot can't rewrite one. A fine-grained token can't be scoped to repos where the bot is only a collaborator under a personal account, so the token is classic `repo`, and the collaborator list is the scope.
 - **The second arch test checks foundry's own packages only**, as its comment already says, because the OpenTelemetry API imports `os`. The first arch test now also bars the SDK and exporters from the core.
 
 ## Global Constraints
@@ -678,7 +679,7 @@ func Setup(ctx context.Context, getenv func(string) string) (func(context.Contex
 		defer cancel()
 		for _, stop := range stops {
 			if err := stop(ctx); err != nil {
-				slog.Warn("telemetry shutdown", "error", err.Error())
+				slog.WarnContext(ctx, "telemetry shutdown", "error", err.Error())
 			}
 		}
 	}, nil
@@ -863,7 +864,7 @@ git commit -m "Export foundry's spans and step durations over OTLP, parented by 
 
 **Interfaces:**
 - Consumes: `app.step` from B1.
-- Produces: `ship.NotConverged = "review did not converge"`; `ShipDeps.Rounds func(repo, branch string) (int, error)`; `ShipDeps.SaveRounds func(repo, branch string, n int) error`; `ShipInput.MaxReviewRounds int`; `store.Run.Detail string` (JSON `detail`); `store.Store.Rounds`, `store.Store.SaveRounds`, `store.Store.LastRun(repo, branch string) (store.Run, bool, error)`; `config.Config.MaxReviewRounds int`; `config.Config.ints() map[string]*int`.
+- Produces: `ship.NotConverged = "review did not converge"`; `ship.Rounds{Count int; LastSHA string}`; `ShipDeps.Rounds func(repo, branch string) (ship.Rounds, error)`; `ShipDeps.SaveRounds func(repo, branch string, r ship.Rounds) error`; `ShipInput.MaxReviewRounds int`; `store.Run.Detail string` (JSON `detail`); `store.Store.Rounds`, `store.Store.SaveRounds`, `store.Store.LastRun(repo, branch string) (store.Run, bool, error)`; `config.Config.MaxReviewRounds int`; `config.Config.ints() map[string]*int`.
 
 - [ ] **Step 1: Write the failing end-to-end test**
 
@@ -876,9 +877,13 @@ func TestShipStopsWhenReviewDoesNotConverge(t *testing.T) {
 	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") {
 		t.Fatalf("round 1: code %d\n%s", code, out)
 	}
+	if out, _, _ = w.foundry("ship", "--recap", w.recap()); !strings.Contains(out, "vouch did not pass") {
+		t.Fatalf("a rerun at the same HEAD counted a round:\n%s", out)
+	}
 	w.commit("fix attempt")
 	out, _, code = w.foundry("ship", "--recap", w.recap())
-	if code != 1 || !strings.Contains(out, "review did not converge after 2 rounds") || !strings.Contains(out, "unbounded retry") {
+	if code != 1 || !strings.Contains(out, "review did not converge after 2 rounds") || !strings.Contains(out, "unbounded retry") ||
+		!strings.Contains(out, "FOUNDRY_MAX_REVIEW_ROUNDS") {
 		t.Fatalf("round 2: code %d\n%s", code, out)
 	}
 	runs := w.runs()
@@ -904,26 +909,27 @@ func (s Store) roundsPath(repo, branch string) string {
 	return filepath.Join(s.Home, "repos", filepath.FromSlash(repo), "review", url.PathEscape(branch)+".json")
 }
 
-type rounds struct {
-	Rounds int `json:"rounds"`
+type roundsJSON struct {
+	Count   int    `json:"count"`
+	LastSHA string `json:"last_sha"`
 }
 
-// Rounds returns how many reviews of branch ended in findings.
-func (s Store) Rounds(repo, branch string) (int, error) {
-	var r rounds
+// Rounds returns the review rounds that ended in findings on branch, and the commit the last one reviewed.
+func (s Store) Rounds(repo, branch string) (ship.Rounds, error) {
+	var r roundsJSON
 	b, err := os.ReadFile(s.roundsPath(repo, branch))
 	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
+		return ship.Rounds{}, nil
 	}
 	if err != nil {
-		return 0, err
+		return ship.Rounds{}, err
 	}
 	err = json.Unmarshal(b, &r)
-	return r.Rounds, err
+	return ship.Rounds{Count: r.Count, LastSHA: r.LastSHA}, err
 }
 
-func (s Store) SaveRounds(repo, branch string, n int) error {
-	return writeJSON(s.roundsPath(repo, branch), rounds{Rounds: n})
+func (s Store) SaveRounds(repo, branch string, r ship.Rounds) error {
+	return writeJSON(s.roundsPath(repo, branch), roundsJSON{Count: r.Count, LastSHA: r.LastSHA})
 }
 
 // LastRun returns the newest ship record for repo and branch.
@@ -958,7 +964,7 @@ func writeJSON(path string, v any) error {
 }
 ```
 
-Make `SaveAnswer` call `writeJSON(s.answerPath(repo, branch), a)`. Add `strings` to the imports.
+Make `SaveAnswer` call `writeJSON(s.answerPath(repo, branch), a)`. Add `strings` and `github.com/tunedev/foundry/internal/core/ship` to the imports.
 
 - [ ] **Step 4: Config key max_review_rounds, with env override for integers**
 
@@ -1016,33 +1022,55 @@ In `internal/core/ship/recap.go`, add:
 ```go
 // NotConverged starts the review stop ship gives once a branch has used its review rounds.
 const NotConverged = "review did not converge"
+
+// Rounds is how many reviews of a branch ended in findings, and the commit the last of them reviewed.
+type Rounds struct {
+	Count   int
+	LastSHA string
+}
 ```
 
-In `app/ship.go`, add `Rounds func(repo, branch string) (int, error)` and `SaveRounds func(repo, branch string, n int) error` to `ShipDeps`, `MaxReviewRounds int` to `ShipInput`, pass the branch to the review step (`return review(ctx, d, in, r.Branch)`), and replace `review`:
+In `app/ship.go`, add `Rounds func(repo, branch string) (ship.Rounds, error)` and `SaveRounds func(repo, branch string, r ship.Rounds) error` to `ShipDeps`, `MaxReviewRounds int` to `ShipInput`, pass the branch to the review step (`return review(ctx, d, in, r.Branch)`), and replace `review`:
 
 ```go
-// review runs vouch on HEAD. Each review that ends in findings counts one round for the branch; the round
-// that reaches in.MaxReviewRounds stops with ship.NotConverged instead of asking for another fix.
+// review runs vouch on HEAD. A review that ends in findings on a commit not counted before adds one round
+// for the branch; the round that reaches in.MaxReviewRounds stops with ship.NotConverged instead of asking
+// for another fix.
 func review(ctx context.Context, d ShipDeps, in ShipInput, branch string) error {
 	err := retryOnce(ctx, in.RetryPause, func() error { return d.Review(ctx, in.Dir) })
 	switch {
 	case err == nil || isTransient(err):
 		return err
 	case errors.Is(err, ports.ErrFindings):
-		n, rerr := d.Rounds(in.Repo, branch)
+		r, rerr := countRound(ctx, d, in, branch)
 		if rerr != nil {
 			return rerr
 		}
-		n++
-		if serr := d.SaveRounds(in.Repo, branch, n); serr != nil {
-			return serr
-		}
-		if n >= in.MaxReviewRounds {
-			return needs("review", "%s after %d rounds; report the last findings to the user and stop:\n%v", ship.NotConverged, n, err)
+		if r.Count >= in.MaxReviewRounds {
+			return needs("review", "%s after %d rounds; report the last findings to the user and stop "+
+				"(to allow more, rerun with FOUNDRY_MAX_REVIEW_ROUNDS above %d):\n%v", ship.NotConverged, r.Count, r.Count, err)
 		}
 		return needs("review", "vouch did not pass this code; fix the findings, commit, rerun:\n%v", err)
 	}
 	return needs("review", "vouch failed to run; report this error to the user:\n%v", err)
+}
+```
+
+Add below it:
+
+```go
+// countRound adds one review round for branch unless HEAD is the commit the last round already counted.
+func countRound(ctx context.Context, d ShipDeps, in ShipInput, branch string) (ship.Rounds, error) {
+	r, err := d.Rounds(in.Repo, branch)
+	if err != nil {
+		return r, err
+	}
+	head, err := d.HeadSHA(ctx, in.Dir)
+	if err != nil || head == r.LastSHA {
+		return r, err
+	}
+	r = ship.Rounds{Count: r.Count + 1, LastSHA: head}
+	return r, d.SaveRounds(in.Repo, branch, r)
 }
 ```
 
@@ -1095,7 +1123,7 @@ git commit -m "Stop ship when review does not converge, and record each stop's d
 
 **Interfaces:**
 - Produces:
-  - `ports.Comment{Author, Body string; CreatedAt time.Time}`; `ports.Issue` gains `Body string; Labels []string; CreatedAt time.Time; Comments []Comment`; `ports.PR` gains `Head, State string`.
+  - `ports.Comment{Author, Body string; Trusted bool; CreatedAt time.Time}`; `Forge.IssueComments(ctx, dir string, number int) ([]Comment, error)`; `ports.Issue` gains `Body string; Labels []string; CreatedAt time.Time; Comments []Comment`; `ports.PR` gains `Head, State string`.
   - `ports.AgentJob{RepoDir, Base, Branch, Prompt string; Verify []string; MaxTurns int}`; `ports.AgentResult{Text, Subtype, SessionID, Model string; Turns int; CostUSD float64}`; `ports.AgentRunner` with `Run(ctx context.Context, job AgentJob) (AgentResult, error)`.
   - `ports.IssueReport{Number int; Title, URL, Outcome, Reason, PRURL, Detail string}`; `ports.Summary{RunID, Repo string; Issues []IssueReport; CostUSD float64; Wall time.Duration; Aborted string}`; `ports.Notifier` with `Notify(ctx context.Context, s Summary) error`.
   - `friction.InProgress = "friction:in-progress"`, `friction.Stuck = "friction:stuck"`, `friction.HitAgain = "Hit again from branch"`.
@@ -1189,11 +1217,13 @@ func TestDecide(t *testing.T) {
 }
 
 func TestPickOrdersByHitsThenAgeAndSkipsTaken(t *testing.T) {
-	hit := ports.Comment{Body: "Hit again from branch `x`."}
+	hit := ports.Comment{Body: "Hit again from branch `x`.", Trusted: true}
+	spam := ports.Comment{Body: "Hit again from branch `y`."}
 	ready := []ports.Issue{
 		{Number: 1, CreatedAt: t0, Labels: []string{"friction:ready"}},
 		{Number: 2, CreatedAt: t0.Add(time.Hour), Labels: []string{"friction:ready"}, Comments: []ports.Comment{hit, hit}},
 		{Number: 3, CreatedAt: t0.Add(-time.Hour), Labels: []string{"friction:ready"}},
+		{Number: 8, CreatedAt: t0.Add(2 * time.Hour), Labels: []string{"friction:ready"}, Comments: []ports.Comment{spam, spam, spam}},
 		{Number: 4, Labels: []string{"friction:ready", "friction:in-progress"}},
 		{Number: 5, Labels: []string{"friction:ready", "friction:stuck"}},
 		{Number: 6, Labels: []string{"friction:ready"}},
@@ -1201,6 +1231,9 @@ func TestPickOrdersByHitsThenAgeAndSkipsTaken(t *testing.T) {
 	}
 	open := []ports.PR{{Head: "friction/6-20261015-020000"}, {Head: "fix-docs", Body: "Fixes #7"}}
 	got := Pick(ready, open, 3)
+	if Hits(ready[3]) != 1 {
+		t.Errorf("untrusted hit comments counted: %d", Hits(ready[3]))
+	}
 	var nums []int
 	for _, is := range got {
 		nums = append(nums, is.Number)
@@ -1260,8 +1293,10 @@ Expected: FAIL to compile (`undefined: ParseWindow`).
 In `ports.go`, add `"time"` to the imports, give `PR` the fields `Head string` and `State string` (`OPEN`, `CLOSED` or `MERGED`), and replace `Issue`:
 
 ```go
+// Comment is an issue comment. Trusted means its author owns the repo or collaborates on it.
 type Comment struct {
 	Author, Body string
+	Trusted      bool
 	CreatedAt    time.Time
 }
 
@@ -1283,6 +1318,7 @@ Add to `Forge`:
 	BranchPR(ctx context.Context, dir, branch string) (PR, bool, error)
 	OpenPRs(ctx context.Context, dir string) ([]PR, error)
 	EditLabels(ctx context.Context, dir string, number int, add, remove []string) error
+	IssueComments(ctx context.Context, dir string, number int) ([]Comment, error)
 ```
 
 Append:
@@ -1474,11 +1510,11 @@ import (
 	"github.com/tunedev/foundry/internal/core/ports"
 )
 
-// Hits is how often the friction was reported: the filing plus each later report's comment.
+// Hits is how often the friction was reported: the filing plus each later report's comment by a trusted author.
 func Hits(is ports.Issue) int {
 	n := 1
 	for _, c := range is.Comments {
-		if strings.HasPrefix(c.Body, friction.HitAgain) {
+		if c.Trusted && strings.HasPrefix(c.Body, friction.HitAgain) {
 			n++
 		}
 	}
@@ -1649,6 +1685,7 @@ func (g GitHub) OpenPRs(ctx context.Context, dir string) ([]ports.PR, error)    
 func (g GitHub) EditLabels(ctx context.Context, dir string, number int, add, remove []string) error {
 	return nil
 }
+func (g GitHub) IssueComments(ctx context.Context, dir string, number int) ([]ports.Comment, error) { return nil, nil }
 ```
 
 Run: `go vet ./... && go test ./...`
@@ -1754,52 +1791,55 @@ git commit -m "Add the work configuration keys and secret file paths"
 ### Task B5: GitHub adapter and fake gh for work
 
 **Files:**
+- Modify: `internal/run/run.go` (`CmdEnv`)
 - Modify: `internal/adapters/outbound/github/github.go`
 - Modify: `cmd/foundry/testdata/fakegh/main.go`
-- Test: `cmd/foundry/e2e_test.go` (existing tests stay green; work tests come in B8)
+- Test: the existing suite; the B8 work tests are this task's behavioural check
 
 **Interfaces:**
 - Consumes: the `ports.Forge` additions from B3.
-- Produces: real `BranchPR`, `OpenPRs`, `EditLabels`; `OpenIssues` fills `Body`, `Labels`, `CreatedAt`, `Comments`. Fake gh state gains `issues[].created_at`, `comments[].author`, `comments[].created_at`, `prs[].state`, `user` (default `foundry-bot`), and handles `issue edit` and `pr list` without `--head` or with `--state all`.
+- Produces: `run.CmdEnv(ctx, timeout, dir string, extra []string, stdin io.Reader, name string, args ...string) ([]byte, error)`; `github.GitHub.Token string`; real `BranchPR`, `OpenPRs`, `EditLabels`, `IssueComments`; `OpenIssues` fills `Body`, `Labels`, `CreatedAt`, `Comments` (with `Trusted` from `authorAssociation`). Fake gh state gains `issues[].created_at`, `comments[].author`, `comments[].association` (default `COLLABORATOR`), `comments[].created_at`, `prs[].state`, `user` (default `foundry-bot`), and handles `issue edit`, `issue view --json comments`, and `pr list` without `--head` or with `--state all`.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Pass the bot token explicitly**
 
-Add to `e2e_test.go` a test that exercises the new fake commands through the adapter in-process:
+B5 has no test of its own: the B8 work tests drive every new command through the built binary and fake gh, and the existing suite pins `FindPR`.
+
+In `internal/run/run.go`, give `Cmd` a sibling that adds variables to the child's environment, and make `Cmd` call it:
 
 ```go
-func TestGitHubAdapterReadsLabelsCommentsAndPRStates(t *testing.T) {
-	w := newWorld(t, "feat")
-	w.setGH(`{"issues":[{"number":1,"title":"Slow","labels":["friction","friction:ready"],"created_at":"2026-10-16T01:00:00Z"}],
-		"comments":[{"issue":1,"author":"foundry-bot","body":"foundry: claimed by run r1","created_at":"2026-10-16T02:00:00Z"}],
-		"prs":[{"number":1,"url":"u1","head":"friction/1-r1","state":"CLOSED"},{"number":2,"url":"u2","head":"other"}]}`)
-	t.Setenv("PATH", fakebin+":"+os.Getenv("PATH"))
-	t.Setenv("FAKE_STATE", w.state)
-	g := github.GitHub{Timeout: time.Minute}
-	ctx := t.Context()
-	issues, err := g.OpenIssues(ctx, w.checkout, "friction:ready")
-	if err != nil || len(issues) != 1 || len(issues[0].Comments) != 1 || issues[0].Comments[0].Author != "foundry-bot" ||
-		!slices.Contains(issues[0].Labels, "friction:ready") || issues[0].CreatedAt.IsZero() {
-		t.Fatalf("issues %+v %v", issues, err)
-	}
-	if pr, found, err := g.BranchPR(ctx, w.checkout, "friction/1-r1"); err != nil || !found || pr.State != "CLOSED" {
-		t.Fatalf("branch pr %+v %v %v", pr, found, err)
-	}
-	if open, err := g.OpenPRs(ctx, w.checkout); err != nil || len(open) != 1 || open[0].Head != "other" {
-		t.Fatalf("open prs %+v %v", open, err)
-	}
-	if err := g.EditLabels(ctx, w.checkout, 1, []string{"friction:in-progress"}, []string{"friction:ready"}); err != nil {
-		t.Fatal(err)
-	}
-	if l := w.gh().Issues[0].Labels; !slices.Equal(l, []string{"friction", "friction:in-progress"}) {
-		t.Fatalf("labels %v", l)
-	}
+// Cmd runs name in dir and returns stdout. (keep the existing doc comment)
+func Cmd(ctx context.Context, timeout time.Duration, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return CmdEnv(ctx, timeout, dir, nil, stdin, name, args...)
 }
+
+// CmdEnv is Cmd with extra appended to the child's environment.
+func CmdEnv(ctx context.Context, timeout time.Duration, dir string, extra []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 ```
 
-Add imports `time` and `github.com/tunedev/foundry/internal/adapters/outbound/github` to `e2e_test.go`.
+The body of `CmdEnv` is the old body of `Cmd`, with `c.Env = append(Env(), extra...)`.
 
-Run: `go test ./cmd/foundry -run TestGitHubAdapter -v`
-Expected: FAIL (`issues[0].Comments` empty: the stub adapter and fake do not provide them).
+In `github.go`, add a `Token string` field to `GitHub`; `gh` sends it when set:
+
+```go
+// GitHub runs gh with Token as GH_TOKEN when it is set, and with gh's own login otherwise.
+type GitHub struct {
+	Timeout time.Duration
+	Token   string
+}
+
+func (g GitHub) gh(ctx context.Context, dir, stdin string, args ...string) ([]byte, error) {
+	var in io.Reader
+	if stdin != "" {
+		in = strings.NewReader(stdin)
+	}
+	var env []string
+	if g.Token != "" {
+		env = []string{"GH_TOKEN=" + g.Token}
+	}
+	out, err := run.CmdEnv(ctx, g.Timeout, dir, env, in, "gh", args...)
+	return out, run.Classify(err)
+}
+```
 
 - [ ] **Step 2: Implement the adapter**
 
@@ -1864,6 +1904,38 @@ func (g GitHub) EditLabels(ctx context.Context, dir string, number int, add, rem
 	return err
 }
 
+type commentJSON struct {
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	AuthorAssociation string    `json:"authorAssociation"`
+	Body              string    `json:"body"`
+	CreatedAt         time.Time `json:"createdAt"`
+}
+
+func (c commentJSON) comment() ports.Comment {
+	trusted := c.AuthorAssociation == "OWNER" || c.AuthorAssociation == "MEMBER" || c.AuthorAssociation == "COLLABORATOR"
+	return ports.Comment{Author: c.Author.Login, Body: c.Body, Trusted: trusted, CreatedAt: c.CreatedAt}
+}
+
+func (g GitHub) IssueComments(ctx context.Context, dir string, number int) ([]ports.Comment, error) {
+	out, err := g.gh(ctx, dir, "", "issue", "view", strconv.Itoa(number), "--json", "comments")
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Comments []commentJSON `json:"comments"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh issue view: %w", err)
+	}
+	cs := make([]ports.Comment, len(raw.Comments))
+	for i, c := range raw.Comments {
+		cs[i] = c.comment()
+	}
+	return cs, nil
+}
+
 type issueJSON struct {
 	Number    int       `json:"number"`
 	Title     string    `json:"title"`
@@ -1873,13 +1945,7 @@ type issueJSON struct {
 	Labels    []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
-	Comments []struct {
-		Author struct {
-			Login string `json:"login"`
-		} `json:"author"`
-		Body      string    `json:"body"`
-		CreatedAt time.Time `json:"createdAt"`
-	} `json:"comments"`
+	Comments []commentJSON `json:"comments"`
 }
 
 func (g GitHub) OpenIssues(ctx context.Context, dir, label string) ([]ports.Issue, error) {
@@ -1899,7 +1965,7 @@ func (g GitHub) OpenIssues(ctx context.Context, dir, label string) ([]ports.Issu
 			is.Labels = append(is.Labels, l.Name)
 		}
 		for _, c := range r.Comments {
-			is.Comments = append(is.Comments, ports.Comment{Author: c.Author.Login, Body: c.Body, CreatedAt: c.CreatedAt})
+			is.Comments = append(is.Comments, c.comment())
 		}
 		issues[i] = is
 	}
@@ -1911,7 +1977,7 @@ Delete the B3 stubs.
 
 - [ ] **Step 3: Extend the fake**
 
-In `fakegh/main.go`: add `State string \`json:"state"\`` to `pr`; `CreatedAt string \`json:"created_at"\`` to `issue`; `Author string \`json:"author"\`` and `CreatedAt string \`json:"created_at"\`` to `comment`; `User string \`json:"user"\`` to `state`. Add imports `cmp` and `time`. Replace the `pr list`, `issue list` and `issue comment` cases and add `issue edit`:
+In `fakegh/main.go`: add `State string \`json:"state"\`` to `pr`; `CreatedAt string \`json:"created_at"\`` to `issue`; `Author string \`json:"author"\``, `Association string \`json:"association"\`` and `CreatedAt string \`json:"created_at"\`` to `comment`; `User string \`json:"user"\`` to `state`. Add imports `cmp` and `time`. Replace the `pr list`, `issue list` and `issue comment` cases and add `issue edit`:
 
 ```go
 	case "pr list":
@@ -1940,13 +2006,22 @@ In `fakegh/main.go`: add `State string \`json:"state"\`` to `pr`; `CreatedAt str
 			}
 			for _, c := range s.Comments {
 				if c.Issue == is.Number {
-					comments = append(comments, map[string]any{"author": map[string]any{"login": c.Author}, "body": c.Body, "createdAt": c.CreatedAt})
+					comments = append(comments, commentOut(c))
 				}
 			}
 			out = append(out, map[string]any{"number": is.Number, "title": is.Title, "url": is.URL, "body": is.Body,
 				"createdAt": cmp.Or(is.CreatedAt, "2026-01-01T00:00:00Z"), "labels": labels, "comments": comments})
 		}
 		printJSON(out)
+	case "issue view":
+		n, _ := strconv.Atoi(rest[0])
+		comments := []map[string]any{}
+		for _, c := range s.Comments {
+			if c.Issue == n {
+				comments = append(comments, commentOut(c))
+			}
+		}
+		printJSON(map[string]any{"comments": comments})
 	case "issue edit":
 		n, _ := strconv.Atoi(rest[0])
 		for i := range s.Issues {
@@ -1968,17 +2043,24 @@ In `fakegh/main.go`: add `State string \`json:"state"\`` to `pr`; `CreatedAt str
 		s.Writes++
 ```
 
-Also set `CreatedAt: time.Now().UTC().Format(time.RFC3339)` in the `issue create` case. Update the package comment to list `issue edit` and the `user` field.
+Also set `CreatedAt: time.Now().UTC().Format(time.RFC3339)` in the `issue create` case, and add:
+
+```go
+func commentOut(c comment) map[string]any {
+	return map[string]any{"author": map[string]any{"login": c.Author}, "authorAssociation": cmp.Or(c.Association, "COLLABORATOR"),
+		"body": c.Body, "createdAt": c.CreatedAt}
+}
+``` Update the package comment to list `issue edit` and the `user` field.
 
 - [ ] **Step 4: Run the tests**
 
 Run: `go vet ./... && go test ./...`
-Expected: PASS, the existing ship and friction tests included.
+Expected: PASS, the existing ship and friction tests included. `FindPR` now passes `--json` before `--head`; the fake reads flags in any order.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add internal/adapters/outbound/github cmd/foundry
+git add internal/run internal/adapters/outbound/github cmd/foundry
 git commit -m "Read labels, comments and pull request states from GitHub, and edit labels"
 ```
 
@@ -1986,12 +2068,13 @@ git commit -m "Read labels, comments and pull request states from GitHub, and ed
 
 **Files:**
 - Create: `skills/skills.go`
+- Modify: `internal/run/run.go` (`Group`)
 - Create: `internal/adapters/outbound/claude/claude.go`, `home.go`
 - Test: `internal/adapters/outbound/claude/claude_test.go`
 
 **Interfaces:**
 - Consumes: `ports.AgentRunner`, `ports.AgentJob`, `ports.AgentResult` (B3); `telemetry.Env` (B1); `run.Cmd`, `run.Classify`.
-- Produces: `skills.FoundryShip []byte`; `claude.Runner{Bin, WorktreeRoot string; GitTimeout time.Duration; Env []string}` implementing `ports.AgentRunner`; `claude.Home{BotName, BotEmail, HooksPath string; Verify []string}`; `claude.PrepareHome(dir string, h Home) error`.
+- Produces: `run.Group(ctx context.Context, dir string, env []string, stdin io.Reader, name string, args ...string) ([]byte, error)`; `skills.FoundryShip []byte`; `claude.Runner{Bin, WorktreeRoot string; GitTimeout time.Duration; Env []string}` implementing `ports.AgentRunner`; `claude.Home{BotName, BotEmail, HooksPath string; Verify []string}`; `claude.PrepareHome(dir string, h Home) error`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2165,7 +2248,65 @@ import _ "embed"
 var FoundryShip []byte
 ```
 
-- [ ] **Step 3: Write the runner**
+- [ ] **Step 3: Process-group runs in internal/run**
+
+Adapters run commands through `internal/run`, so the group kill lives there. In `run.go`, move the part of `CmdEnv` from `c.WaitDelay = 5 * time.Second` to the end into `output`, and add `Group`:
+
+```go
+// CmdEnv is Cmd with extra appended to the child's environment.
+func CmdEnv(ctx context.Context, timeout time.Duration, dir string, extra []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	c := exec.CommandContext(ctx, name, args...)
+	c.Dir, c.Env, c.Stdin = dir, append(Env(), extra...), stdin
+	return output(ctx, c, " after "+timeout.String())
+}
+
+// Group runs name in dir with exactly env and no deadline of its own, in a new process group: ending ctx
+// kills every process the command started. Output, errors and logging are as for Cmd.
+func Group(ctx context.Context, dir string, env []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	c := exec.CommandContext(ctx, name, args...)
+	c.Dir, c.Env, c.Stdin = dir, env, stdin
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
+	return output(ctx, c, "")
+}
+
+// output runs c and returns stdout. A deadline that ends ctx is ErrTimeout; a non-zero exit is *Error.
+// After ctx ends it waits at most 5s more for children still holding the output pipes.
+func output(ctx context.Context, c *exec.Cmd, after string) ([]byte, error) {
+	c.WaitDelay = 5 * time.Second
+	var stderr bytes.Buffer
+	c.Stderr = &stderr
+	start := time.Now()
+	out, err := c.Output()
+	exit := -1
+	if c.ProcessState != nil {
+		exit = c.ProcessState.ExitCode()
+	}
+	line := strings.Join(c.Args, " ")
+	attrs := []any{"argv", c.Args, "dir", c.Dir, "duration_ms", time.Since(start).Milliseconds(), "exit", exit}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		slog.WarnContext(ctx, "exec timed out", append(attrs, "stderr", tail(stderr.String()))...)
+		return out, fmt.Errorf("%s: %w%s", line, ErrTimeout, after)
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "exec failed", append(attrs, "stderr", tail(stderr.String()), "stdout", tail(string(out)))...)
+		e := &Error{Stderr: strings.TrimSpace(stderr.String()), Err: err}
+		e.Msg = fmt.Sprintf("%s: %v: %s", line, err, e.Stderr)
+		if s := tail(string(out)); s != "" {
+			e.Msg += "\nstdout: " + s
+		}
+		return out, e
+	}
+	slog.DebugContext(ctx, "exec", attrs...)
+	return out, nil
+}
+```
+
+Add `syscall` to the imports. `TestClassifyIgnoresStdout` and the e2e suite pin that `Cmd`'s messages are unchanged.
+
+- [ ] **Step 4: Write the runner**
 
 Create `internal/adapters/outbound/claude/claude.go`:
 
@@ -2174,18 +2315,15 @@ Create `internal/adapters/outbound/claude/claude.go`:
 package claude
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -2243,20 +2381,12 @@ func (r Runner) removeWorktree(ctx context.Context, job ports.AgentJob, dir stri
 	}
 }
 
-// claude runs the agent in its own process group, so cancelling ctx kills every process it started.
-// A result on stdout counts even when claude exits non-zero, as it does at the turn limit.
+// claude runs the agent as a process group, so ending ctx kills every process it started. A result on
+// stdout counts even when claude exits non-zero, as it does at the turn limit.
 func (r Runner) claude(ctx context.Context, dir string, job ports.AgentJob) (ports.AgentResult, error) {
-	c := exec.CommandContext(ctx, r.Bin, "-p", "--output-format", "json", "--max-turns", strconv.Itoa(job.MaxTurns),
-		"--permission-mode", "dontAsk", "--setting-sources", "user", "--strict-mcp-config")
-	c.Dir = dir
-	c.Env = append(slices.Clone(r.Env), telemetry.Env(ctx)...)
-	c.Stdin = strings.NewReader(job.Prompt)
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
-	c.WaitDelay = 5 * time.Second
-	var stderr bytes.Buffer
-	c.Stderr = &stderr
-	out, err := c.Output()
+	env := append(slices.Clone(r.Env), telemetry.Env(ctx)...)
+	out, err := run.Group(ctx, dir, env, strings.NewReader(job.Prompt), r.Bin, "-p", "--output-format", "json",
+		"--max-turns", strconv.Itoa(job.MaxTurns), "--permission-mode", "dontAsk", "--setting-sources", "user", "--strict-mcp-config")
 	res, perr := parse(out)
 	if perr == nil {
 		return res, nil
@@ -2264,7 +2394,7 @@ func (r Runner) claude(ctx context.Context, dir string, job ports.AgentJob) (por
 	if err == nil {
 		err = perr
 	}
-	return res, fmt.Errorf("claude: %w: %s", err, strings.TrimSpace(stderr.String()))
+	return res, fmt.Errorf("claude: %w", err)
 }
 
 type resultJSON struct {
@@ -2287,7 +2417,7 @@ func parse(out []byte) (ports.AgentResult, error) {
 }
 ```
 
-- [ ] **Step 4: Write the agent home**
+- [ ] **Step 5: Write the agent home**
 
 Create `internal/adapters/outbound/claude/home.go`:
 
@@ -2356,15 +2486,15 @@ func bashRules(cmds []string) []string {
 }
 ```
 
-- [ ] **Step 5: Run the tests**
+- [ ] **Step 6: Run the tests**
 
-Run: `go vet ./... && go test ./internal/adapters/outbound/claude -v`
-Expected: PASS, all five tests.
+Run: `go vet ./... && go test ./...`
+Expected: PASS, the five claude tests included.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add skills internal/adapters/outbound/claude
+git add skills internal/run internal/adapters/outbound/claude
 git commit -m "Run Claude Code headless in a fresh worktree as the agent runner"
 ```
 
@@ -3000,6 +3130,18 @@ func TestWorkRerunOverFinishedIssuesWritesNothing(t *testing.T) {
 	}
 }
 
+func TestWorkDoesNotDuplicateACommentWhenTheResponseIsLost(t *testing.T) {
+	w := newWorkWorld(t)
+	w.setGH(`{"issues":[` + fmt.Sprintf(readyIssue, 1, 1, ago(time.Hour)) + `],
+		"lose_once":{"issue comment":"HTTP 502: Bad Gateway (https://api.github.com/graphql)"}}`)
+	if _, _, code := w.work(); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if cs := w.comments(1); len(cs) != 2 {
+		t.Fatalf("comments %q, want one claim and one ready", cs)
+	}
+}
+
 func TestWorkFailsAtStartupWithoutASecretFile(t *testing.T) {
 	w := newWorkWorld(t)
 	os.Remove(filepath.Join(w.home, "secrets", "github-token"))
@@ -3027,6 +3169,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -3153,11 +3296,30 @@ func pick(ctx context.Context, d WorkDeps, in WorkInput) ([]ports.Issue, error) 
 
 // relabel comments, then edits labels, each retried once on a transient failure. A crash between the two
 // leaves the labels as they were.
-func relabel(ctx context.Context, d WorkDeps, in WorkInput, n int, comment string, add, remove []string) error {
-	if err := retryOnce(ctx, in.RetryPause, func() error { return d.Forge.CommentIssue(ctx, in.Dir, n, comment) }); err != nil {
+func relabel(ctx context.Context, d WorkDeps, in WorkInput, n int, body string, add, remove []string) error {
+	if err := comment(ctx, d, in, n, body); err != nil {
 		return err
 	}
 	return retryOnce(ctx, in.RetryPause, func() error { return d.Forge.EditLabels(ctx, in.Dir, n, add, remove) })
+}
+
+// comment posts body on issue n. A retry first reads the issue's comments and skips the write when the bot
+// already posted this body, as when the first attempt's response was lost.
+func comment(ctx context.Context, d WorkDeps, in WorkInput, n int, body string) error {
+	attempted := false
+	return retryOnce(ctx, in.RetryPause, func() error {
+		if attempted {
+			cs, err := d.Forge.IssueComments(ctx, in.Dir, n)
+			if err != nil {
+				return err
+			}
+			if slices.ContainsFunc(cs, func(c ports.Comment) bool { return c.Author == in.Bot && strings.TrimSpace(c.Body) == strings.TrimSpace(body) }) {
+				return nil
+			}
+		}
+		attempted = true
+		return d.Forge.CommentIssue(ctx, in.Dir, n, body)
+	})
 }
 
 func runIssue(ctx context.Context, d WorkDeps, in WorkInput, is ports.Issue) (ports.IssueReport, float64) {
@@ -3195,9 +3357,7 @@ func runAgent(ctx context.Context, d WorkDeps, in WorkInput, is ports.Issue, bra
 func applyOutcome(ctx context.Context, d WorkDeps, in WorkInput, n int, o work.Outcome) error {
 	switch o.Kind {
 	case work.ReadyForHuman:
-		return retryOnce(ctx, in.RetryPause, func() error {
-			return d.Forge.CommentIssue(ctx, in.Dir, n, "foundry: "+o.PRURL+" is ready for review.")
-		})
+		return comment(ctx, d, in, n, "foundry: "+o.PRURL+" is ready for review.")
 	case work.NeedsDecision:
 		return relabel(ctx, d, in, n, "foundry: this needs a decision.\n\n"+publicSafe(o.Detail, in.UserDataPaths),
 			[]string{friction.NeedsDecision.Label()}, []string{friction.InProgress, friction.Ready.Label()})
@@ -3276,7 +3436,7 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 	if err := claude.PrepareHome(agentHome, home); err != nil {
 		return usageErr(err)
 	}
-	os.Setenv("GH_TOKEN", sec.githubToken)
+	w.forge.Token = sec.githubToken
 	window, _ := cfg.Window()
 	s, err := app.Work(ctx, w.workDeps(sec, agentEnv(cfg, sec, agentHome, vouchHome, os.Getenv)), app.WorkInput{
 		Dir: w.dir, Repo: w.id, Base: w.repo.Base, RunID: time.Now().UTC().Format("20060102-150405"), Bot: cfg.BotName,
@@ -3341,7 +3501,7 @@ func agentEnv(cfg config.Config, sec secrets, home, vouchHome string, getenv fun
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" + or("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318"),
 	}
 	for _, name := range cfg.AgentPassEnv {
-		if v, ok := os.LookupEnv(name); ok {
+		if v := getenv(name); v != "" {
 			env = append(env, name+"="+v)
 		}
 	}
@@ -3395,7 +3555,7 @@ git commit -m "Add foundry work: release claims, pick, run the agent per issue a
 
 **Interfaces:**
 - Consumes: the sink from B1; `newWorkWorld` from B8; the `foundry.agent` span from B6.
-- Produces: instruments `foundry_issue_outcomes_total`, `foundry_agent_cost_usd_total`, `foundry_review_rounds`, `foundry_friction_filed_total`.
+- Produces: instruments `foundry_issue_outcomes_total`, `foundry_agent_cost_usd_total`, `foundry_review_rounds`, `foundry_friction_filed_total`; `WorkDeps.Rounds func(repo, branch string) (ship.Rounds, error)`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3430,7 +3590,7 @@ func TestWorkTraceCoversOneIssueThroughShip(t *testing.T) {
 	}
 	names := sink.metricNames()
 	for _, m := range []string{"foundry_issue_outcomes_total", "foundry_agent_cost_usd_total", "foundry_step_duration_seconds",
-		"foundry_review_rounds", "foundry_friction_filed_total"} {
+		"foundry_review_rounds"} {
 		if !slices.Contains(names, m) {
 			t.Errorf("metric %s not exported; got %v", m, names)
 		}
@@ -3438,7 +3598,7 @@ func TestWorkTraceCoversOneIssueThroughShip(t *testing.T) {
 }
 ```
 
-The fake agent's ship run reports no friction (it runs `friction none`), so `foundry_friction_filed_total` comes from nowhere in this test: drop that name from the list here and assert it in the friction test instead. Add to `TestFrictionFileCreatesLabelledIssueThenDedupes` in `e2e_test.go`: create a sink, `w.exportTo(sink)` before the first `friction file`, and after it `if !slices.Contains(sink.metricNames(), "foundry_friction_filed_total") { t.Error(...) }`.
+The fake agent runs `friction none`, so `foundry_friction_filed_total` is asserted in the friction test instead. Add to `TestFrictionFileCreatesLabelledIssueThenDedupes` in `e2e_test.go`: create a sink, `w.exportTo(sink)` before the first `friction file`, and after it `if !slices.Contains(sink.metricNames(), "foundry_friction_filed_total") { t.Error(...) }`.
 
 Run: `go test ./cmd/foundry -run 'TestWorkTrace|TestFrictionFileCreates' -v`
 Expected: FAIL `metric foundry_issue_outcomes_total not exported` (the spans already pass from B1, B6 and B8; if a span assertion fails, that is a real defect in an earlier task; fix it there).
@@ -3462,18 +3622,13 @@ In `runIssue` (work.go), after the `step` call:
 	agentCost.Add(ctx, res.CostUSD, metric.WithAttributes(attribute.String("repo", in.Repo), attribute.String("model", res.Model)))
 ```
 
-In `review` (ship.go), record rounds when review passes and when it stops not converged:
+Review rounds are recorded once per worked issue, so reruns of ship on one branch never add samples. Add `Rounds func(repo, branch string) (ship.Rounds, error)` to `WorkDeps`, wire it to `w.store.Rounds` in `workDeps`, and in `runIssue`, after the `step` call:
 
 ```go
-	case err == nil:
-		n, rerr := d.Rounds(in.Repo, branch)
-		reviewRounds.Record(ctx, int64(n), metric.WithAttributes(attribute.String("repo", in.Repo)))
-		return rerr
-	case isTransient(err):
-		return err
+	if r, err := d.Rounds(in.Repo, branch); err == nil {
+		reviewRounds.Record(ctx, int64(r.Count), metric.WithAttributes(attribute.String("repo", in.Repo)))
+	}
 ```
-
-and in the not-converged branch, before returning: `reviewRounds.Record(ctx, int64(n), metric.WithAttributes(attribute.String("repo", in.Repo)))`.
 
 In `FileFriction`, after a successful filing, before `Save`:
 
@@ -3632,7 +3787,10 @@ Each step is checked from this session before the next.
 2. As the bot, create a classic token with scope `repo`; save it to `~/.foundry/secrets/github-token` (mode 600). Check: `GH_TOKEN=$(cat ~/.foundry/secrets/github-token) gh api user -q .login` prints `tunedev-foundry`.
 3. Discord webhook URL to `~/.foundry/secrets/discord-webhook`. Check: one test message, sent only after you agree.
 4. `claude setup-token` output to `~/.foundry/secrets/claude-oauth-token`. Check: file exists, mode 600, non-empty.
-5. A ruleset on `main` of each opted-in repo: one approving review required, Repository admin in the bypass list. Check: `gh api repos/tunedev/<repo>/rulesets`.
+5. Two rulesets on each opted-in repo, with Repository admin in each bypass list:
+   - `main`: one approving review required.
+   - All branches: block force pushes and deletions.
+   Check: `gh api repos/tunedev/<repo>/rulesets`. After step 6, also check on the sandbox that a force-push with the bot's token to a pushed `friction/*` branch is refused.
 6. Create `tunedev/foundry-sandbox` with a Go module, CI, `foundry.toml`, vouch rules, the bot as Write collaborator and the same ruleset.
 7. Vouch policy per opted-in repo: `vouch repo set gate_severity minor`, `vouch repo set ack_below false`, `vouch repo set post_reviews true`. Check: `vouch repo` in each.
 8. `loginctl enable-linger`. Check: `loginctl show-user $USER -p Linger` prints `Linger=yes`.
