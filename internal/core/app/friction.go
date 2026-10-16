@@ -82,7 +82,7 @@ func fileOnce(ctx context.Context, forge ports.Forge, in FileInput, beforeCreate
 		}
 	}
 	if m, ok := friction.Match(in.Title, open); ok {
-		return Filed{Issue: m, Duplicate: true}, beforeCreate, forge.CommentIssue(ctx, in.Dir, m.Number, "Hit again from branch `"+in.Branch+"`.\n\n"+in.Body)
+		return Filed{Issue: m, Duplicate: true}, beforeCreate, forge.CommentIssue(ctx, in.Dir, m.Number, friction.HitAgain+" `"+in.Branch+"`.\n\n"+in.Body)
 	}
 	issue, err := forge.CreateIssue(ctx, in.Dir, ports.NewIssue{Title: in.Title, Body: in.Body, Labels: []string{friction.Label, in.Kind.Label()}})
 	return Filed{Issue: issue}, append([]ports.Issue{}, open...), err

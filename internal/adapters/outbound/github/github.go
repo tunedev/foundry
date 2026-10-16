@@ -135,3 +135,17 @@ func (g GitHub) CommentIssue(ctx context.Context, dir string, number int, body s
 	_, err := g.gh(ctx, dir, body, "issue", "comment", strconv.Itoa(number), "--body-file", "-")
 	return err
 }
+
+func (g GitHub) BranchPR(ctx context.Context, dir, branch string) (ports.PR, bool, error) {
+	return ports.PR{}, false, nil
+}
+
+func (g GitHub) OpenPRs(ctx context.Context, dir string) ([]ports.PR, error) { return nil, nil }
+
+func (g GitHub) EditLabels(ctx context.Context, dir string, number int, add, remove []string) error {
+	return nil
+}
+
+func (g GitHub) IssueComments(ctx context.Context, dir string, number int) ([]ports.Comment, error) {
+	return nil, nil
+}

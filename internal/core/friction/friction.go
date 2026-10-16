@@ -19,6 +19,13 @@ const (
 
 const Label = "friction"
 
+const (
+	InProgress = "friction:in-progress"
+	Stuck      = "friction:stuck"
+	// HitAgain starts the comment a later report of the same friction leaves on its issue.
+	HitAgain = "Hit again from branch"
+)
+
 // AllLabels is every label the loop uses; filing a report makes sure they exist.
 var AllLabels = []string{Label, "friction:ready", "friction:needs-decision", "friction:cleanup", "friction:in-progress", "friction:stuck"}
 
