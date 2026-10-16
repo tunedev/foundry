@@ -54,22 +54,22 @@ func Ship(ctx context.Context, d ShipDeps, in ShipInput) (Report, error) {
 	var pr ports.PR
 	steps := []struct {
 		name string
-		fn   func() error
+		fn   func(context.Context) error
 	}{
-		{"preflight", func() (err error) { r.Branch, err = preflight(ctx, d, in); return err }},
-		{"checks", func() error { return runChecks(ctx, d, in) }},
-		{"review", func() error { return review(ctx, d, in) }},
-		{"push-pr", func() (err error) {
+		{"preflight", func(ctx context.Context) (err error) { r.Branch, err = preflight(ctx, d, in); return err }},
+		{"checks", func(ctx context.Context) error { return runChecks(ctx, d, in) }},
+		{"review", func(ctx context.Context) error { return review(ctx, d, in) }},
+		{"push-pr", func(ctx context.Context) (err error) {
 			head, pr, err = pushAndPR(ctx, d, in, r.Branch)
 			r.PRURL = pr.URL
 			return err
 		}},
-		{"ci", func() error { return waitCI(ctx, d, in, r.Branch, head, pr) }},
-		{"friction", func() error { return frictionGiven(d, in.Repo, r.Branch) }},
+		{"ci", func(ctx context.Context) error { return waitCI(ctx, d, in, r.Branch, head, pr) }},
+		{"friction", func(context.Context) error { return frictionGiven(d, in.Repo, r.Branch) }},
 	}
 	for _, s := range steps {
 		r.Step = s.name
-		if err := step(ctx, s.name, s.fn); err != nil {
+		if err := step(ctx, "foundry.ship."+strings.ReplaceAll(s.name, "-", "_"), s.fn); err != nil {
 			return r, err
 		}
 		r.Passed = append(r.Passed, s.name)

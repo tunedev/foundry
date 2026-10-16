@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,8 @@ import (
 	"github.com/tunedev/foundry/internal/core/app"
 	"github.com/tunedev/foundry/internal/core/friction"
 	"github.com/tunedev/foundry/internal/core/ports"
+	"github.com/tunedev/foundry/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const usage = `usage: foundry <command>
@@ -62,6 +65,21 @@ func dispatch(args []string) int {
 	defer logs.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdown, err := telemetry.Setup(ctx, os.Getenv)
+	if err != nil {
+		return usageErr(err)
+	}
+	defer shutdown(context.WithoutCancel(ctx))
+	ctx, span := telemetry.Start(ctx, "foundry."+args[0], os.Getenv)
+	defer span.End()
+	code := command(ctx, cfg, args)
+	if code != exitOK {
+		span.SetStatus(codes.Error, "exit "+strconv.Itoa(code))
+	}
+	return code
+}
+
+func command(ctx context.Context, cfg config.Config, args []string) int {
 	switch args[0] {
 	case "ship":
 		return cmdShip(ctx, cfg, args[1:])

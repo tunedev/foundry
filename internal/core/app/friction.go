@@ -48,7 +48,7 @@ func FileFriction(ctx context.Context, d FrictionDeps, in FileInput) (Filed, err
 	}
 	var f Filed
 	var created []ports.Issue
-	err = step(ctx, "file friction", func() error {
+	err = step(ctx, "foundry.friction.file", func(ctx context.Context) error {
 		return retryOnce(ctx, in.RetryPause, func() (err error) {
 			f, created, err = fileOnce(ctx, d.Forge, in, created)
 			return err

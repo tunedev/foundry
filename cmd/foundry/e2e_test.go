@@ -46,12 +46,16 @@ func newWorld(t *testing.T, branch string) *world {
 	root := t.TempDir()
 	w := &world{t: t, root: root, home: filepath.Join(root, "foundry-home"), checkout: filepath.Join(root, "work", "widget"),
 		origin: filepath.Join(root, "remotes", "acme", "widget.git"), state: filepath.Join(root, "gh-state.json")}
-	w.env = append(os.Environ(),
+	base := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "TRACEPARENT=") || strings.HasPrefix(kv, "TRACESTATE=") || strings.HasPrefix(kv, "OTEL_")
+	})
+	w.env = append(base,
 		"PATH="+fakebin+":"+os.Getenv("PATH"), "HOME="+root, "FOUNDRY_HOME="+w.home,
 		"FAKE_STATE="+w.state, "FAKE_LOGS="+root,
 		"FOUNDRY_CI_POLL=10ms", "FOUNDRY_RETRY_PAUSE=1ms", "FOUNDRY_CI_TIMEOUT=5s",
 		"GIT_CONFIG_GLOBAL="+filepath.Join(root, ".gitconfig"), "GIT_CONFIG_NOSYSTEM=1",
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		"OTEL_TRACES_EXPORTER=none", "OTEL_METRICS_EXPORTER=none")
 	seed := filepath.Join(root, "seed")
 	w.git("", "init", "-q", "-b", "main", seed)
 	w.write(seed, "foundry.toml", "checks = [\"true\"]\n")

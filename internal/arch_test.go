@@ -13,7 +13,9 @@ func TestCoreImportsNoDriver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, dep := range strings.Fields(string(out)) {
-		if strings.Contains(dep, "/internal/adapters/") || strings.HasSuffix(dep, "/internal/run") || dep == "os/exec" {
+		if strings.Contains(dep, "/internal/adapters/") || strings.HasSuffix(dep, "/internal/run") || dep == "os/exec" ||
+			dep == "github.com/tunedev/foundry/internal/telemetry" || strings.HasPrefix(dep, "go.opentelemetry.io/otel/sdk") ||
+			strings.HasPrefix(dep, "go.opentelemetry.io/otel/exporters") {
 			t.Errorf("core depends on %s", dep)
 		}
 	}
@@ -28,6 +30,9 @@ func TestCoreReachesNoOSThroughOurPackages(t *testing.T) {
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
+		if !strings.HasPrefix(fields[0], "github.com/tunedev/foundry/") {
+			continue
+		}
 		for _, imp := range fields[1:] {
 			if imp == "os" || imp == "os/exec" {
 				t.Errorf("%s imports %s", fields[0], imp)
