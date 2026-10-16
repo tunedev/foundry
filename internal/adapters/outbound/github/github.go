@@ -33,17 +33,24 @@ func (g GitHub) gh(ctx context.Context, dir, stdin string, args ...string) ([]by
 	return out, run.Classify(err)
 }
 
-const prFields = "number,url,body,headRefOid,headRefName,state"
+const prFields = "number,url,body,headRefOid,headRefName,state,isCrossRepository"
 
 type prJSON struct {
-	Number      int    `json:"number"`
-	URL         string `json:"url"`
-	Body        string `json:"body"`
-	HeadRefOid  string `json:"headRefOid"`
-	HeadRefName string `json:"headRefName"`
-	State       string `json:"state"`
+	Number            int    `json:"number"`
+	URL               string `json:"url"`
+	Body              string `json:"body"`
+	HeadRefOid        string `json:"headRefOid"`
+	HeadRefName       string `json:"headRefName"`
+	State             string `json:"state"`
+	IsCrossRepository bool   `json:"isCrossRepository"`
 }
 
+// prLimit bounds every pull request listing. gh filters --head by branch name alone, so a listing by branch
+// also returns fork pull requests and is read in full before they are dropped.
+const prLimit = "200"
+
+// listPRs lists the repository's own pull requests, newest first. Pull requests from forks are dropped:
+// only accounts with write access can push a branch to the repository itself.
 func (g GitHub) listPRs(ctx context.Context, dir string, args ...string) ([]ports.PR, error) {
 	out, err := g.gh(ctx, dir, "", append([]string{"pr", "list", "--json", prFields}, args...)...)
 	if err != nil {
@@ -53,9 +60,11 @@ func (g GitHub) listPRs(ctx context.Context, dir string, args ...string) ([]port
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("gh pr list: %w", err)
 	}
-	prs := make([]ports.PR, len(raw))
-	for i, p := range raw {
-		prs[i] = ports.PR{Number: p.Number, URL: p.URL, Body: p.Body, HeadSHA: p.HeadRefOid, Head: p.HeadRefName, State: p.State}
+	var prs []ports.PR
+	for _, p := range raw {
+		if !p.IsCrossRepository {
+			prs = append(prs, ports.PR{Number: p.Number, URL: p.URL, Body: p.Body, HeadSHA: p.HeadRefOid, Head: p.HeadRefName, State: p.State})
+		}
 	}
 	return prs, nil
 }
@@ -68,15 +77,15 @@ func first(prs []ports.PR, err error) (ports.PR, bool, error) {
 }
 
 func (g GitHub) FindPR(ctx context.Context, dir, branch string) (ports.PR, bool, error) {
-	return first(g.listPRs(ctx, dir, "--head", branch, "--state", "open", "--limit", "1"))
+	return first(g.listPRs(ctx, dir, "--head", branch, "--state", "open", "--limit", prLimit))
 }
 
 func (g GitHub) BranchPR(ctx context.Context, dir, branch string) (ports.PR, bool, error) {
-	return first(g.listPRs(ctx, dir, "--head", branch, "--state", "all", "--limit", "1"))
+	return first(g.listPRs(ctx, dir, "--head", branch, "--state", "all", "--limit", prLimit))
 }
 
 func (g GitHub) OpenPRs(ctx context.Context, dir string) ([]ports.PR, error) {
-	return g.listPRs(ctx, dir, "--state", "open", "--limit", "200")
+	return g.listPRs(ctx, dir, "--state", "open", "--limit", prLimit)
 }
 
 func (g GitHub) EditLabels(ctx context.Context, dir string, number int, add, remove []string) error {

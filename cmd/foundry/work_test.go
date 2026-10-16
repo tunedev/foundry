@@ -276,6 +276,28 @@ func TestWorkSendsARejectedFixToDecision(t *testing.T) {
 	}
 }
 
+func TestWorkIgnoresForkPullRequests(t *testing.T) {
+	w := newWorkWorld(t)
+	w.setGH(`{"issues":[{"number":1,"title":"Issue 1","labels":["friction","friction:ready","friction:in-progress"]},` +
+		fmt.Sprintf(readyIssue, 2, 2, ago(time.Hour)) + `],
+		"comments":[{"issue":1,"author":"foundry-bot","body":"foundry: claimed by run r0","created_at":"` + ago(3*time.Hour) + `"}],
+		"prs":[{"number":1,"url":"https://github.com/acme/widget/pull/1","head":"friction/1-r0","state":"CLOSED","cross":true},
+		       {"number":2,"url":"https://github.com/acme/widget/pull/2","head":"patch","body":"Fixes #2","cross":true}]}`)
+	if _, _, code := w.work(); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if l := w.labels(1); slices.Contains(l, "friction:needs-decision") || !slices.Contains(l, "friction:ready") {
+		t.Fatalf("issue 1 labels %v: a fork PR on the claim branch decided the release", l)
+	}
+	var mine []string
+	for _, p := range w.gh().PRs[2:] {
+		mine = append(mine, p.Head)
+	}
+	if len(mine) != 2 || !strings.HasPrefix(mine[0], "friction/1-") || !strings.HasPrefix(mine[1], "friction/2-") {
+		t.Fatalf("bot PRs %v: a fork PR blocked a pick", mine)
+	}
+}
+
 func TestWorkRepicksWhenTheNewClaimExpiresAfterARejection(t *testing.T) {
 	w := newWorkWorld(t)
 	w.setGH(`{"issues":[{"number":1,"title":"Issue 1","labels":["friction","friction:ready","friction:in-progress"]}],

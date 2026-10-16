@@ -1,7 +1,8 @@
 // Command fakegh stands in for gh in foundry's end-to-end tests. Its state is the JSON file named by
 // FAKE_STATE. fail_once fails a command before it writes; lose_once fails it after it writes, as when
 // a response is lost. user names the account that posts comments (default foundry-bot). A pull request's
-// head is read from the checkout's origin, as GitHub would report it. Commands handled: pr list, pr create,
+// head is read from the checkout's origin, as GitHub would report it; cross marks a pull request from a fork.
+// pr list honours --head, --state open and --limit. Commands handled: pr list, pr create,
 // pr edit, pr checks, label create, issue list, issue view, issue create, issue edit, issue comment.
 package main
 
@@ -25,6 +26,7 @@ type pr struct {
 	Head   string `json:"head"`
 	Title  string `json:"title"`
 	State  string `json:"state"`
+	Cross  bool   `json:"cross"`
 }
 
 type issue struct {
@@ -91,15 +93,16 @@ func handle(s *state, cmd string, rest []string) int {
 	switch cmd {
 	case "pr list":
 		head, st := flagVal(rest, "--head"), flagVal(rest, "--state")
+		limit, _ := strconv.Atoi(cmp.Or(flagVal(rest, "--limit"), "30"))
 		out := []map[string]any{}
-		for i := len(s.PRs) - 1; i >= 0; i-- {
+		for i := len(s.PRs) - 1; i >= 0 && len(out) < limit; i-- {
 			p := s.PRs[i]
 			state := cmp.Or(p.State, "OPEN")
 			if head != "" && p.Head != head || st == "open" && state != "OPEN" {
 				continue
 			}
 			out = append(out, map[string]any{"number": p.Number, "url": p.URL, "body": p.Body,
-				"headRefOid": remoteHead(p.Head), "headRefName": p.Head, "state": state})
+				"headRefOid": remoteHead(p.Head), "headRefName": p.Head, "state": state, "isCrossRepository": p.Cross})
 		}
 		printJSON(out)
 	case "pr create":
