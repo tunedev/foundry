@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tunedev/foundry/internal/core/work"
 )
 
 type Duration struct{ time.Duration }
@@ -36,6 +37,18 @@ type Config struct {
 	UserDataPaths   []string `toml:"user_data_paths"`
 	LogLevel        string   `toml:"log_level"`
 	Home            string   `toml:"-"`
+
+	WorkWindow         string   `toml:"work_window"`
+	ClaimLease         Duration `toml:"claim_lease"`
+	IssueTimeout       Duration `toml:"issue_timeout"`
+	MaxIssuesPerRun    int      `toml:"max_issues_per_run"`
+	MaxTurns           int      `toml:"max_turns"`
+	GitHubTokenFile    string   `toml:"github_token_file"`
+	ClaudeTokenFile    string   `toml:"claude_token_file"`
+	DiscordWebhookFile string   `toml:"discord_webhook_file"`
+	BotName            string   `toml:"bot_name"`
+	BotEmail           string   `toml:"bot_email"`
+	AgentPassEnv       []string `toml:"agent_pass_env"`
 }
 
 func Defaults() Config {
@@ -48,6 +61,10 @@ func Defaults() Config {
 		RetryPause:      Duration{2 * time.Second},
 		MaxReviewRounds: 3,
 		LogLevel:        "info",
+		ClaimLease:      Duration{2 * time.Hour},
+		IssueTimeout:    Duration{45 * time.Minute},
+		MaxIssuesPerRun: 3,
+		MaxTurns:        150,
 	}
 }
 
@@ -93,21 +110,51 @@ func Load(home string, getenv func(string) string) (Config, error) {
 			*n = i
 		}
 	}
-	if v := getenv("FOUNDRY_LOG_LEVEL"); v != "" {
-		c.LogLevel = v
+	for key, p := range c.strings() {
+		if v := getenv("FOUNDRY_" + strings.ToUpper(key)); v != "" {
+			*p = v
+		}
+	}
+	if v := getenv("FOUNDRY_AGENT_PASS_ENV"); v != "" {
+		c.AgentPassEnv = nonEmpty(strings.Split(v, ","))
+	}
+	for p, name := range map[*string]string{&c.GitHubTokenFile: "github-token", &c.ClaudeTokenFile: "claude-oauth-token", &c.DiscordWebhookFile: "discord-webhook"} {
+		if *p == "" {
+			*p = filepath.Join(home, "secrets", name)
+		}
 	}
 	return c, c.validate()
+}
+
+func nonEmpty(items []string) []string {
+	var out []string
+	for _, s := range items {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (c *Config) strings() map[string]*string {
+	return map[string]*string{
+		"log_level": &c.LogLevel, "work_window": &c.WorkWindow, "bot_name": &c.BotName, "bot_email": &c.BotEmail,
+		"github_token_file": &c.GitHubTokenFile, "claude_token_file": &c.ClaudeTokenFile, "discord_webhook_file": &c.DiscordWebhookFile,
+	}
 }
 
 func (c *Config) durations() map[string]*Duration {
 	return map[string]*Duration{
 		"call_timeout": &c.CallTimeout, "review_timeout": &c.ReviewTimeout, "check_timeout": &c.CheckTimeout,
 		"ci_timeout": &c.CITimeout, "ci_poll": &c.CIPoll, "retry_pause": &c.RetryPause,
+		"claim_lease": &c.ClaimLease, "issue_timeout": &c.IssueTimeout,
 	}
 }
 
 func (c *Config) ints() map[string]*int {
-	return map[string]*int{"max_review_rounds": &c.MaxReviewRounds}
+	return map[string]*int{
+		"max_review_rounds": &c.MaxReviewRounds, "max_issues_per_run": &c.MaxIssuesPerRun, "max_turns": &c.MaxTurns,
+	}
 }
 
 func (c *Config) validate() error {
@@ -122,6 +169,9 @@ func (c *Config) validate() error {
 			errs = append(errs, fmt.Errorf("%s must be at least 1", key))
 		}
 	}
+	if _, err := c.Window(); err != nil {
+		errs = append(errs, err)
+	}
 	if _, err := c.Level(); err != nil {
 		errs = append(errs, fmt.Errorf("log_level: %w", err))
 	}
@@ -133,3 +183,6 @@ func (c Config) Level() (slog.Level, error) {
 	err := l.UnmarshalText([]byte(c.LogLevel))
 	return l, err
 }
+
+// Window is the daily stretch of local time in which work starts issues.
+func (c Config) Window() (work.Window, error) { return work.ParseWindow(c.WorkWindow) }

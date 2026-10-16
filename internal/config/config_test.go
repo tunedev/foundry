@@ -62,3 +62,34 @@ func TestLoadIntegersFromEnv(t *testing.T) {
 		t.Errorf("zero rounds: %v", err)
 	}
 }
+
+func TestLoadWorkDefaultsAndSecretPaths(t *testing.T) {
+	home := t.TempDir()
+	c, err := Load(home, env(map[string]string{"FOUNDRY_MAX_ISSUES_PER_RUN": "1", "FOUNDRY_CLAIM_LEASE": "30m"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxIssuesPerRun != 1 || c.ClaimLease.Duration != 30*time.Minute || c.IssueTimeout.Duration != 45*time.Minute ||
+		c.MaxTurns != 150 || c.GitHubTokenFile != filepath.Join(home, "secrets", "github-token") ||
+		c.DiscordWebhookFile != filepath.Join(home, "secrets", "discord-webhook") {
+		t.Fatalf("%+v", c)
+	}
+	os.WriteFile(filepath.Join(home, "config.toml"), []byte("work_window = \"25:00-07:00\"\n"), 0o644)
+	if _, err := Load(home, env(nil)); err == nil || !strings.Contains(err.Error(), "work_window") {
+		t.Errorf("bad window: %v", err)
+	}
+}
+
+func TestLoadWorkStringAndListKeysFromEnv(t *testing.T) {
+	c, err := Load(t.TempDir(), env(map[string]string{
+		"FOUNDRY_BOT_NAME":       "foundry-bot",
+		"FOUNDRY_WORK_WINDOW":    "22:00-07:00",
+		"FOUNDRY_AGENT_PASS_ENV": "A,,B",
+	}))
+	if err != nil || c.BotName != "foundry-bot" || c.WorkWindow != "22:00-07:00" || strings.Join(c.AgentPassEnv, "|") != "A|B" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if _, err := Load(t.TempDir(), env(map[string]string{"FOUNDRY_WORK_WINDOW": "25:00-07:00"})); err == nil || !strings.Contains(err.Error(), "work_window") {
+		t.Errorf("bad env window: %v", err)
+	}
+}
