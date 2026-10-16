@@ -4,9 +4,11 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -16,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tunedev/foundry/internal/core/ports"
 	"github.com/tunedev/foundry/internal/run"
@@ -68,12 +71,14 @@ func (r Runner) removeWorktree(ctx context.Context, job ports.AgentJob, dir stri
 	}
 }
 
-// claude runs the agent as a process group, so ending ctx kills every process it started. A result on
-// stdout counts even when claude exits non-zero, as it does at the turn limit.
+// claude runs the agent as a process group, so ending ctx kills every process it started, and sets the
+// process's exit code on ctx's span. A result on stdout counts even when claude exits non-zero, as it does
+// at the turn limit.
 func (r Runner) claude(ctx context.Context, dir string, job ports.AgentJob) (ports.AgentResult, error) {
 	env := append(slices.Clone(r.Env), telemetry.Env(ctx)...)
 	out, err := run.Group(ctx, dir, env, strings.NewReader(job.Prompt), r.Bin, "-p", "--output-format", "json",
 		"--max-turns", strconv.Itoa(job.MaxTurns), "--permission-mode", "dontAsk", "--setting-sources", "user", "--strict-mcp-config")
+	trace.SpanFromContext(ctx).SetAttributes(attribute.Int("exit", exitCode(err)))
 	res, perr := parse(out)
 	if perr == nil {
 		return res, nil
@@ -82,6 +87,17 @@ func (r Runner) claude(ctx context.Context, dir string, job ports.AgentJob) (por
 		err = perr
 	}
 	return res, fmt.Errorf("claude: %w", err)
+}
+
+// exitCode is the exit code of the process err came from: 0 for no error, -1 when it was killed or never started.
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 type resultJSON struct {

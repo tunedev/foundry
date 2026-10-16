@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -16,8 +17,9 @@ var bin, fakebin string
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "foundry-e2e-")
-	bin, fakebin = filepath.Join(dir, "foundry"), filepath.Join(dir, "fakebin")
-	for out, pkg := range map[string]string{bin: ".", filepath.Join(fakebin, "gh"): "./testdata/fakegh"} {
+	bin, fakebin = filepath.Join(dir, "fakebin", "foundry"), filepath.Join(dir, "fakebin")
+	for out, pkg := range map[string]string{bin: ".", filepath.Join(fakebin, "gh"): "./testdata/fakegh",
+		filepath.Join(fakebin, "claude"): "./testdata/fakeclaude"} {
 		if b, err := exec.Command("go", "build", "-o", out, pkg).CombinedOutput(); err != nil {
 			os.Stderr.Write(b)
 			os.Exit(1)
@@ -39,9 +41,21 @@ type world struct {
 	t                                   *testing.T
 	root, home, checkout, origin, state string
 	env                                 []string
+	discord                             []string
+	discordMu                           *sync.Mutex
 }
 
 func newWorld(t *testing.T, branch string) *world {
+	t.Helper()
+	w := seedWorld(t)
+	w.git(w.checkout, "checkout", "-qb", branch)
+	w.commit("feature work")
+	w.write(w.root, "recap.md", goodRecap)
+	return w
+}
+
+// seedWorld is a bare origin seeded with foundry.toml and calc.go on main, and a clone of it as the checkout.
+func seedWorld(t *testing.T) *world {
 	t.Helper()
 	root := t.TempDir()
 	w := &world{t: t, root: root, home: filepath.Join(root, "foundry-home"), checkout: filepath.Join(root, "work", "widget"),
@@ -58,15 +72,12 @@ func newWorld(t *testing.T, branch string) *world {
 		"OTEL_TRACES_EXPORTER=none", "OTEL_METRICS_EXPORTER=none")
 	seed := filepath.Join(root, "seed")
 	w.git("", "init", "-q", "-b", "main", seed)
-	w.write(seed, "foundry.toml", "checks = [\"true\"]\n")
+	w.write(seed, "foundry.toml", "checks = [\"true\"]\nverify = [\"true\"]\n")
 	w.write(seed, "calc.go", "package calc\n")
 	w.git(seed, "add", ".")
 	w.git(seed, "commit", "-qm", "seed")
 	w.git("", "clone", "-q", "--bare", seed, w.origin)
 	w.git("", "clone", "-q", w.origin, w.checkout)
-	w.git(w.checkout, "checkout", "-qb", branch)
-	w.commit("feature work")
-	w.write(root, "recap.md", goodRecap)
 	return w
 }
 
@@ -122,18 +133,21 @@ func (w *world) setGH(js string) { os.WriteFile(w.state, []byte(js), 0o644) }
 
 type ghState struct {
 	PRs []struct {
-		Number     int
-		Body, Head string
+		Number            int
+		Body, Head, State string
 	} `json:"prs"`
 	Issues []struct {
 		Number int
 		Title  string
 		Labels []string
 	} `json:"issues"`
-	Comments    []struct{ Issue int } `json:"comments"`
-	Labels      []string              `json:"labels"`
-	ChecksCalls int                   `json:"checks_calls"`
-	Writes      int                   `json:"writes"`
+	Comments []struct {
+		Issue        int
+		Body, Author string
+	} `json:"comments"`
+	Labels      []string `json:"labels"`
+	ChecksCalls int      `json:"checks_calls"`
+	Writes      int      `json:"writes"`
 }
 
 func (w *world) gh() ghState {

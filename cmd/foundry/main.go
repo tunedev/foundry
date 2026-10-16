@@ -21,6 +21,7 @@ import (
 	"github.com/tunedev/foundry/internal/core/app"
 	"github.com/tunedev/foundry/internal/core/friction"
 	"github.com/tunedev/foundry/internal/core/ports"
+	"github.com/tunedev/foundry/internal/core/work"
 	"github.com/tunedev/foundry/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -33,6 +34,8 @@ const usage = `usage: foundry <command>
         file a friction report, or comment on a similar open one
   friction none --reason <r>
         record that this branch hit no friction
+  work
+        release stale claims, then run an agent on each ready friction issue and send a summary
   config
         print the resolved config
 `
@@ -85,6 +88,8 @@ func command(ctx context.Context, cfg config.Config, args []string) int {
 		return cmdShip(ctx, cfg, args[1:])
 	case "friction":
 		return cmdFriction(ctx, cfg, args[1:])
+	case "work":
+		return cmdWork(ctx, cfg, args[1:])
 	case "config":
 		return cmdConfig(cfg)
 	}
@@ -259,7 +264,7 @@ func outcome(err error) string {
 	var na *app.NeedsAction
 	switch {
 	case err == nil:
-		return "ready-for-human"
+		return string(work.ReadyForHuman)
 	case errors.As(err, &na):
 		return "needs-action"
 	case errors.Is(err, ports.ErrTransient):
