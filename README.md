@@ -44,7 +44,8 @@ person, 1 is a stop to act on (the last line says what), 2 is a usage or config 
 to `max_issues_per_run` `friction:ready` issues opened by the bot or the repo owner, and runs `claude -p` on
 each in a fresh worktree as the bot, under `~/.foundry/agent`. Each issue ends `ready-for-human`,
 `needs-decision` or `stuck`, and the run summary goes to Discord. One run at a time; a second exits at once.
-The timer works every checkout in turn, every 2 hours.
+The timer works every checkout in turn, every 2 hours. The agent's file tools cannot read outside its
+worktree; the commands it runs (`go`, `git`, `foundry`, `vouch`) are not OS-confined until increment 3.
 
     make install-timer
     systemctl --user enable --now foundry-work.timer

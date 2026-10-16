@@ -10,10 +10,10 @@ import (
 )
 
 // Home is what an agent's HOME holds: the bot's git identity, vouch's hooks, Claude Code's permission
-// allowlist and the foundry-ship skill.
+// allowlist and the foundry-ship skill. Secrets are the absolute paths of foundry's secret files.
 type Home struct {
 	BotName, BotEmail, HooksPath string
-	Verify                       []string
+	Verify, Secrets              []string
 }
 
 // PrepareHome writes the agent's .gitconfig, .claude/settings.json and foundry-ship skill under dir,
@@ -33,7 +33,9 @@ func PrepareHome(dir string, h Home) error {
 	settings, err := json.MarshalIndent(map[string]any{"permissions": map[string]any{
 		"allow": append([]string{"Read", "Glob", "Grep", "Edit(./**)", "Write(./**)", "Bash(go:*)", "Bash(git:*)",
 			"Bash(foundry:*)", "Bash(vouch:*)"}, bashRules(h.Verify)...),
-		"deny": []string{"Bash(gh:*)", "Bash(git push:*)", "Bash(vouch ack:*)", "Bash(vouch rules:*)", "WebFetch", "WebSearch"},
+		"deny": append([]string{"Bash(gh:*)", "Bash(git push:*)", "Bash(git -c:*)", "Bash(vouch ack:*)", "Bash(vouch rules:*)",
+			"WebFetch", "WebSearch"}, readRules(h.Secrets)...),
+		"blockReadsOutsideWorkingDirectories": true,
 	}}, "", "  ")
 	if err != nil {
 		return err
@@ -51,6 +53,15 @@ func PrepareHome(dir string, h Home) error {
 		}
 	}
 	return nil
+}
+
+// readRules are Read rules for absolute paths, which Claude Code writes with a leading "//".
+func readRules(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = "Read(/" + p + ")"
+	}
+	return out
 }
 
 func bashRules(cmds []string) []string {

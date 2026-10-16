@@ -140,8 +140,12 @@ func TestWorkShipsReadyIssueToHandOff(t *testing.T) {
 	if d := w.discordBodies(); len(d) != 1 || !strings.Contains(d[0], "pull/1") || !strings.Contains(d[0], `"allowed_mentions":{"parse":[]}`) {
 		t.Fatalf("discord %q", d)
 	}
-	if b, _ := os.ReadFile(filepath.Join(w.home, "agent", ".claude", "settings.json")); !strings.Contains(string(b), `"Bash(gh:*)"`) {
-		t.Fatalf("agent settings do not deny gh:\n%s", b)
+	b, _ := os.ReadFile(filepath.Join(w.home, "agent", ".claude", "settings.json"))
+	for _, rule := range []string{`"Bash(gh:*)"`, `"Bash(git -c:*)"`, `"blockReadsOutsideWorkingDirectories": true`,
+		`"Read(/` + filepath.Join(w.home, "secrets", "github-token") + `)"`} {
+		if !strings.Contains(string(b), rule) {
+			t.Fatalf("agent settings lack %s:\n%s", rule, b)
+		}
 	}
 	if entries, _ := os.ReadDir(filepath.Join(w.home, "worktrees")); len(entries) != 0 {
 		t.Fatalf("worktrees left: %v", entries)

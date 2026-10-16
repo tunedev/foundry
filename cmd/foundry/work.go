@@ -54,7 +54,8 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 		vouchHome = filepath.Join(u, ".vouch")
 	}
 	agentHome := filepath.Join(cfg.Home, "agent")
-	home := claude.Home{BotName: cfg.BotName, BotEmail: cfg.BotEmail, HooksPath: filepath.Join(vouchHome, "githooks"), Verify: w.repo.Verify}
+	home := claude.Home{BotName: cfg.BotName, BotEmail: cfg.BotEmail, HooksPath: filepath.Join(vouchHome, "githooks"),
+		Verify: w.repo.Verify, Secrets: []string{cfg.GitHubTokenFile, cfg.ClaudeTokenFile, cfg.DiscordWebhookFile}}
 	if err := claude.PrepareHome(agentHome, home); err != nil {
 		return usageErr(err)
 	}
