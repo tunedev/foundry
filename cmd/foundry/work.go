@@ -44,6 +44,10 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 	if err != nil {
 		return usageErr(err)
 	}
+	w.forge.Token = sec.githubToken
+	if err := checkBotLogin(ctx, w, cfg.BotName); err != nil {
+		return usageErr(err)
+	}
 	vouchHome := os.Getenv("VOUCH_HOME")
 	if vouchHome == "" {
 		u, _ := os.UserHomeDir()
@@ -54,7 +58,6 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 	if err := claude.PrepareHome(agentHome, home); err != nil {
 		return usageErr(err)
 	}
-	w.forge.Token = sec.githubToken
 	window, _ := cfg.Window()
 	s, err := app.Work(ctx, w.workDeps(sec, agentEnv(cfg, sec, agentHome, vouchHome, os.Getenv)), app.WorkInput{
 		Dir: w.dir, Repo: w.id, Base: w.repo.Base, RunID: time.Now().UTC().Format("20060102-150405"), Bot: cfg.BotName,
@@ -69,6 +72,18 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 		return stopWith(err)
 	}
 	return exitOK
+}
+
+// checkBotLogin fails unless the bot token acts as bot_name, the login claims and trust are compared against.
+func checkBotLogin(ctx context.Context, w repoEnv, bot string) error {
+	login, err := w.forge.Login(ctx, w.dir)
+	if err != nil {
+		return fmt.Errorf("work: reading the bot token's GitHub login: %w", err)
+	}
+	if !strings.EqualFold(login, bot) {
+		return fmt.Errorf("work: bot_name is %q but the bot token acts as GitHub login %q; set bot_name to the bot's login", bot, login)
+	}
+	return nil
 }
 
 // owner is the account that owns repo id owner/name.

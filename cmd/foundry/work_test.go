@@ -447,3 +447,19 @@ func TestWorkTraceCoversOneIssueThroughShip(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkFailsAtStartupWhenBotNameIsNotTheTokensLogin(t *testing.T) {
+	w := newWorkWorld(t)
+	w.setGH(`{"user":"Foundry-Bot2","issues":[` + fmt.Sprintf(readyIssue, 1, 1, ago(time.Hour)) + `]}`)
+	out, errOut, code := w.work()
+	if code != 2 || !strings.Contains(errOut, `"foundry-bot"`) || !strings.Contains(errOut, `"Foundry-Bot2"`) || w.gh().Writes != 0 {
+		t.Fatalf("code %d writes %d\n%s%s", code, w.gh().Writes, out, errOut)
+	}
+	if strings.Contains(out+errOut, "bot-token") {
+		t.Fatalf("the token was printed\n%s%s", out, errOut)
+	}
+	w.setGH(`{"user":"FOUNDRY-BOT"}`)
+	if _, errOut, code := w.work(); code != 0 {
+		t.Fatalf("a login differing only in case: code %d\n%s", code, errOut)
+	}
+}

@@ -2,7 +2,7 @@
 // FAKE_STATE. fail_once fails a command before it writes; lose_once fails it after it writes, as when
 // a response is lost. user names the account that posts comments (default foundry-bot). A pull request's
 // head is read from the checkout's origin, as GitHub would report it; cross marks a pull request from a fork.
-// pr list honours --head, --state open and --limit. Commands handled: pr list, pr create,
+// pr list honours --head, --state open and --limit. Commands handled: api user (prints user), pr list, pr create,
 // pr edit, pr checks, label create, issue list, issue view, issue create, issue edit, issue comment.
 package main
 
@@ -105,6 +105,8 @@ func handle(s *state, cmd string, rest []string) int {
 				"headRefOid": remoteHead(p.Head), "headRefName": p.Head, "state": state, "isCrossRepository": p.Cross})
 		}
 		printJSON(out)
+	case "api user":
+		fmt.Println(cmp.Or(s.User, "foundry-bot"))
 	case "pr create":
 		n := len(s.PRs) + 1
 		p := pr{Number: n, URL: fmt.Sprintf("https://github.com/acme/widget/pull/%d", n), Body: stdin(),

@@ -49,7 +49,8 @@ The timer works every checkout in turn, every 2 hours.
     make install-timer
     systemctl --user enable --now foundry-work.timer
 
-Needs `bot_name`, `bot_email` and the secret files `github_token_file`, `claude_token_file`,
+Needs `bot_name` (the bot account's GitHub login; claims and trust compare against it, and `work` exits 2
+at startup unless the bot token acts as that login), `bot_email` and the secret files `github_token_file`, `claude_token_file`,
 `discord_webhook_file` (defaults under `~/.foundry/secrets/`), and `loginctl enable-linger`.
 
 ## Configuration

@@ -33,6 +33,12 @@ func (g GitHub) gh(ctx context.Context, dir, stdin string, args ...string) ([]by
 	return out, run.Classify(err)
 }
 
+// Login is the GitHub login gh acts as.
+func (g GitHub) Login(ctx context.Context, dir string) (string, error) {
+	out, err := g.gh(ctx, dir, "", "api", "user", "--jq", ".login")
+	return strings.TrimSpace(string(out)), err
+}
+
 const prFields = "number,url,body,headRefOid,headRefName,state,isCrossRepository"
 
 type prJSON struct {
