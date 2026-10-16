@@ -1,9 +1,12 @@
 // Command fakegh stands in for gh in foundry's end-to-end tests. Its state is the JSON file named by
 // FAKE_STATE. fail_once fails a command before it writes; lose_once fails it after it writes, as when
-// a response is lost. A pull request's head is read from the checkout's origin, as GitHub would report it.
+// a response is lost. user names the account that posts comments (default foundry-bot). A pull request's
+// head is read from the checkout's origin, as GitHub would report it. Commands handled: pr list, pr create,
+// pr edit, pr checks, label create, issue list, issue view, issue create, issue edit, issue comment.
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type pr struct {
@@ -20,19 +24,24 @@ type pr struct {
 	Body   string `json:"body"`
 	Head   string `json:"head"`
 	Title  string `json:"title"`
+	State  string `json:"state"`
 }
 
 type issue struct {
-	Number int      `json:"number"`
-	Title  string   `json:"title"`
-	URL    string   `json:"url"`
-	Body   string   `json:"body"`
-	Labels []string `json:"labels"`
+	Number    int      `json:"number"`
+	Title     string   `json:"title"`
+	URL       string   `json:"url"`
+	Body      string   `json:"body"`
+	Labels    []string `json:"labels"`
+	Author    string   `json:"author"`
+	CreatedAt string   `json:"created_at"`
 }
 
 type comment struct {
-	Issue int    `json:"issue"`
-	Body  string `json:"body"`
+	Issue     int    `json:"issue"`
+	Body      string `json:"body"`
+	Author    string `json:"author"`
+	CreatedAt string `json:"created_at"`
 }
 
 type check struct {
@@ -51,6 +60,7 @@ type state struct {
 	FailOnce    map[string]string `json:"fail_once"`
 	LoseOnce    map[string]string `json:"lose_once"`
 	Writes      int               `json:"writes"`
+	User        string            `json:"user"`
 }
 
 func main() {
@@ -80,12 +90,16 @@ func main() {
 func handle(s *state, cmd string, rest []string) int {
 	switch cmd {
 	case "pr list":
-		head := flagVal(rest, "--head")
+		head, st := flagVal(rest, "--head"), flagVal(rest, "--state")
 		out := []map[string]any{}
-		for _, p := range s.PRs {
-			if p.Head == head {
-				out = append(out, map[string]any{"number": p.Number, "url": p.URL, "body": p.Body, "headRefOid": remoteHead(head)})
+		for i := len(s.PRs) - 1; i >= 0; i-- {
+			p := s.PRs[i]
+			state := cmp.Or(p.State, "OPEN")
+			if head != "" && p.Head != head || st == "open" && state != "OPEN" {
+				continue
 			}
+			out = append(out, map[string]any{"number": p.Number, "url": p.URL, "body": p.Body,
+				"headRefOid": remoteHead(p.Head), "headRefName": p.Head, "state": state})
 		}
 		printJSON(out)
 	case "pr create":
@@ -125,26 +139,67 @@ func handle(s *state, cmd string, rest []string) int {
 		label := flagVal(rest, "--label")
 		out := []map[string]any{}
 		for _, is := range s.Issues {
-			if slices.Contains(is.Labels, label) {
-				out = append(out, map[string]any{"number": is.Number, "title": is.Title, "url": is.URL})
+			if !slices.Contains(is.Labels, label) {
+				continue
 			}
+			labels, comments := []map[string]any{}, []map[string]any{}
+			for _, l := range is.Labels {
+				labels = append(labels, map[string]any{"name": l})
+			}
+			for _, c := range s.Comments {
+				if c.Issue == is.Number {
+					comments = append(comments, commentOut(c))
+				}
+			}
+			out = append(out, map[string]any{"number": is.Number, "title": is.Title, "url": is.URL, "body": is.Body,
+				"author":    map[string]any{"login": cmp.Or(is.Author, "acme")},
+				"createdAt": cmp.Or(is.CreatedAt, "2026-01-01T00:00:00Z"), "labels": labels, "comments": comments})
 		}
 		printJSON(out)
+	case "issue view":
+		n, _ := strconv.Atoi(rest[0])
+		comments := []map[string]any{}
+		for _, c := range s.Comments {
+			if c.Issue == n {
+				comments = append(comments, commentOut(c))
+			}
+		}
+		printJSON(map[string]any{"comments": comments})
+	case "issue edit":
+		n, _ := strconv.Atoi(rest[0])
+		for i := range s.Issues {
+			if s.Issues[i].Number != n {
+				continue
+			}
+			for _, l := range flagVals(rest, "--add-label") {
+				if !slices.Contains(s.Issues[i].Labels, l) {
+					s.Issues[i].Labels = append(s.Issues[i].Labels, l)
+				}
+			}
+			s.Issues[i].Labels = slices.DeleteFunc(s.Issues[i].Labels, func(l string) bool { return slices.Contains(flagVals(rest, "--remove-label"), l) })
+		}
+		s.Writes++
 	case "issue create":
 		n := len(s.Issues) + 1
 		url := fmt.Sprintf("https://github.com/acme/widget/issues/%d", n)
-		s.Issues = append(s.Issues, issue{Number: n, Title: flagVal(rest, "--title"), URL: url, Body: stdin(), Labels: flagVals(rest, "--label")})
+		s.Issues = append(s.Issues, issue{Number: n, Title: flagVal(rest, "--title"), URL: url, Body: stdin(), Labels: flagVals(rest, "--label"),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 		s.Writes++
 		fmt.Println(url)
 	case "issue comment":
 		n, _ := strconv.Atoi(rest[0])
-		s.Comments = append(s.Comments, comment{Issue: n, Body: stdin()})
+		s.Comments = append(s.Comments, comment{Issue: n, Body: stdin(), Author: cmp.Or(s.User, "foundry-bot"),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339)})
 		s.Writes++
 	default:
 		fmt.Fprintln(os.Stderr, "fake gh: unhandled", cmd)
 		return 1
 	}
 	return 0
+}
+
+func commentOut(c comment) map[string]any {
+	return map[string]any{"author": map[string]any{"login": c.Author}, "body": c.Body, "createdAt": c.CreatedAt}
 }
 
 func flagVal(args []string, name string) string {

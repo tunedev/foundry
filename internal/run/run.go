@@ -30,10 +30,15 @@ func (e *Error) Unwrap() error { return e.Err }
 // After the timeout it waits at most 5s more for children still holding the output pipes.
 // Every run is logged: DEBUG on success, WARN with stderr and stdout excerpts on failure.
 func Cmd(ctx context.Context, timeout time.Duration, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return CmdEnv(ctx, timeout, dir, nil, stdin, name, args...)
+}
+
+// CmdEnv is Cmd with extra appended to the child's environment.
+func CmdEnv(ctx context.Context, timeout time.Duration, dir string, extra []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, name, args...)
-	c.Dir, c.Env = dir, Env()
+	c.Dir, c.Env = dir, append(Env(), extra...)
 	c.WaitDelay = 5 * time.Second
 	c.Stdin = stdin
 	var stderr bytes.Buffer
