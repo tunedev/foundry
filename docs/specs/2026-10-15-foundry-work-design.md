@@ -28,7 +28,9 @@ Success is the three checks in [Success](#success), in order.
 Three pieces, each its own pull request or checked setup:
 
 1. **`infra`: workstation telemetry.** Add an OTel Collector (OTLP on `localhost:4318`) and Tempo
-   to the workstation stack. The collector sends metrics to Prometheus by remote write and traces
+   to the workstation stack. The collector's delta_to_cumulative processor turns foundry's delta
+   counters into running totals, a Prometheus exporter on 127.0.0.1:8889 publishes them and Prometheus
+   scrapes it (with created-timestamp zero ingestion so a new series counts from zero); traces go
    to Tempo; Grafana gains Tempo as a data source and the foundry dashboard. Verified by a test
    span and a test metric reaching Grafana before foundry depends on it.
 2. **`foundry`: `foundry work`, the timer, the summary and telemetry**, as specified below. The
