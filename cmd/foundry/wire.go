@@ -77,6 +77,7 @@ func (w repoEnv) workDeps(sec secrets, env []string) app.WorkDeps {
 			r, ok, err := w.store.LastRun(repo, branch)
 			return work.ShipRecord{Step: r.Step, Outcome: r.Outcome, PRURL: r.PRURL, Detail: r.Detail}, ok, err
 		},
-		Now: time.Now,
+		Rounds: w.store.Rounds,
+		Now:    time.Now,
 	}
 }

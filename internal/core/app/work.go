@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tunedev/foundry/internal/core/friction"
 	"github.com/tunedev/foundry/internal/core/ports"
+	"github.com/tunedev/foundry/internal/core/ship"
 	"github.com/tunedev/foundry/internal/core/work"
 )
 
@@ -22,6 +24,7 @@ type WorkDeps struct {
 	Agent    ports.AgentRunner
 	Notifier ports.Notifier
 	LastShip func(repo, branch string) (work.ShipRecord, bool, error)
+	Rounds   func(repo, branch string) (ship.Rounds, error)
 	Now      func() time.Time
 }
 
@@ -174,6 +177,12 @@ func runIssue(ctx context.Context, d WorkDeps, in WorkInput, is ports.Issue) (po
 		span.SetAttributes(attribute.String("outcome", string(o.Kind)), attribute.String("reason", string(o.Reason)))
 		return applyOutcome(ctx, d, in, is.Number, o)
 	})
+	issueOutcomes.Add(ctx, 1, metric.WithAttributes(attribute.String("repo", in.Repo),
+		attribute.String("outcome", string(o.Kind)), attribute.String("reason", string(o.Reason))))
+	agentCost.Add(ctx, res.CostUSD, metric.WithAttributes(attribute.String("repo", in.Repo), attribute.String("model", res.Model)))
+	if r, rerr := d.Rounds(in.Repo, branch); rerr == nil {
+		reviewRounds.Record(ctx, int64(r.Count), metric.WithAttributes(attribute.String("repo", in.Repo)))
+	}
 	rep := ports.IssueReport{Number: is.Number, Title: is.Title, URL: is.URL, Outcome: string(o.Kind), Reason: string(o.Reason),
 		PRURL: o.PRURL, Detail: o.Detail}
 	if err != nil {

@@ -180,6 +180,8 @@ func (w *world) runs() []runLine {
 
 func TestFrictionFileCreatesLabelledIssueThenDedupes(t *testing.T) {
 	w := newWorld(t, "feat")
+	sink := startSink(t)
+	w.exportTo(sink)
 	body := w.write(w.root, "f.md", goodFriction)
 	out, errOut, code := w.foundry("friction", "file", "--title", "Test suite takes 4 minutes to run", "--body-file", body, "--kind", "ready")
 	if code != 0 || !strings.Contains(out, "filed #1") {
@@ -188,6 +190,9 @@ func TestFrictionFileCreatesLabelledIssueThenDedupes(t *testing.T) {
 	s := w.gh()
 	if len(s.Issues) != 1 || !slices.Equal(s.Issues[0].Labels, []string{"friction", "friction:ready"}) || !slices.Contains(s.Labels, "friction:needs-decision") {
 		t.Fatalf("state %+v", s)
+	}
+	if !slices.Contains(sink.metricNames(), "foundry_friction_filed_total") {
+		t.Errorf("foundry_friction_filed_total not exported; got %v", sink.metricNames())
 	}
 	out, _, code = w.foundry("friction", "file", "--title", "Test suite takes 4 minutes", "--body-file", body, "--kind", "ready")
 	if s := w.gh(); code != 0 || !strings.Contains(out, "commented on #1") || len(s.Issues) != 1 || len(s.Comments) != 1 {
@@ -311,10 +316,16 @@ func TestShipStopsAtFailingCheckWithItsOutput(t *testing.T) {
 
 func TestShipStopsAtVouchFindings(t *testing.T) {
 	w := newWorld(t, "feat")
+	sink := startSink(t)
+	w.exportTo(sink)
 	w.write(w.root, "vouch-gate-fail", "minor calc.go:1 retries on HTTP 502 without backoff\n")
 	out, _, code := w.foundry("ship", "--recap", w.recap())
 	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") || !strings.Contains(out, "without backoff") {
 		t.Fatalf("code %d\n%s", code, out)
+	}
+	rv := named(sink.spans(), "foundry.ship.review")
+	if len(rv) != 1 || !strings.Contains(rv[0].Attrs["round"], "1") || !strings.Contains(rv[0].Attrs["findings.minor"], "1") {
+		t.Errorf("review span %+v", rv)
 	}
 }
 

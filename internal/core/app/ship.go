@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/tunedev/foundry/internal/core/friction"
 	"github.com/tunedev/foundry/internal/core/ports"
@@ -128,6 +132,7 @@ func review(ctx context.Context, d ShipDeps, in ShipInput, branch string) error 
 		if rerr != nil {
 			return rerr
 		}
+		trace.SpanFromContext(ctx).SetAttributes(findingAttrs(r.Count, err)...)
 		if r.Count >= in.MaxReviewRounds {
 			return needs("review", "%s after %d rounds; report the last findings to the user and stop "+
 				"(to allow more, rerun with FOUNDRY_MAX_REVIEW_ROUNDS above %d):\n%v", ship.NotConverged, r.Count, r.Count, err)
@@ -136,6 +141,26 @@ func review(ctx context.Context, d ShipDeps, in ShipInput, branch string) error 
 	}
 	return needs("review", "vouch failed to run; report this error to the user:\n%v", err)
 }
+
+// findingAttrs is the review round and the count of findings per severity, read from the leading word of
+// each findings line.
+func findingAttrs(round int, err error) []attribute.KeyValue {
+	counts := map[string]int{}
+	for _, line := range strings.Split(err.Error(), "\n") {
+		if w, _, _ := strings.Cut(strings.TrimSpace(line), " "); slices.Contains(severities, strings.ToLower(w)) {
+			counts[strings.ToLower(w)]++
+		}
+	}
+	attrs := []attribute.KeyValue{attribute.Int("round", round)}
+	for _, sev := range severities {
+		if n := counts[sev]; n > 0 {
+			attrs = append(attrs, attribute.Int("findings."+sev, n))
+		}
+	}
+	return attrs
+}
+
+var severities = []string{"blocker", "critical", "major", "minor", "nit"}
 
 // countRound adds one review round for branch unless HEAD is the commit the last round already counted.
 func countRound(ctx context.Context, d ShipDeps, in ShipInput, branch string) (ship.Rounds, error) {

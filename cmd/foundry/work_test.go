@@ -388,3 +388,40 @@ func TestWorkFailsAtStartupWithoutASecretFile(t *testing.T) {
 		t.Fatalf("a secret value was printed\nstdout %s\nstderr %s", out, errOut)
 	}
 }
+
+func TestWorkTraceCoversOneIssueThroughShip(t *testing.T) {
+	sink := startSink(t)
+	w := newWorkWorld(t)
+	w.exportTo(sink)
+	w.setGH(`{"issues":[` + fmt.Sprintf(readyIssue, 1, 1, ago(time.Hour)) + `]}`)
+	if _, _, code := w.work(); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	spans := sink.spans()
+	one := func(name string) sinkSpan {
+		got := named(spans, name)
+		if len(got) != 1 {
+			t.Fatalf("%s: %d spans; all %+v", name, len(got), spans)
+		}
+		return got[0]
+	}
+	root, issue, agent, ship := one("foundry.work"), one("foundry.issue"), one("foundry.agent"), one("foundry.ship")
+	for child, parent := range map[string]sinkSpan{
+		"foundry.claims.release": root, "foundry.pick": root, "foundry.issue": root,
+		"foundry.worktree": issue, "foundry.agent": issue, "foundry.ship": agent, "foundry.ship.review": ship,
+	} {
+		if c := one(child); c.Parent != parent.ID || c.Trace != root.Trace {
+			t.Errorf("%s: parent %s trace %s, want %s in %s", child, c.Parent, c.Trace, parent.ID, root.Trace)
+		}
+	}
+	if !strings.Contains(agent.Attrs["session.id"], "fake-session") || !strings.Contains(issue.Attrs["outcome"], "ready-for-human") {
+		t.Errorf("agent %v issue %v", agent.Attrs, issue.Attrs)
+	}
+	names := sink.metricNames()
+	for _, m := range []string{"foundry_issue_outcomes_total", "foundry_agent_cost_usd_total", "foundry_step_duration_seconds",
+		"foundry_review_rounds"} {
+		if !slices.Contains(names, m) {
+			t.Errorf("metric %s not exported; got %v", m, names)
+		}
+	}
+}
