@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -38,9 +39,29 @@ func CmdEnv(ctx context.Context, timeout time.Duration, dir string, extra []stri
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, name, args...)
-	c.Dir, c.Env = dir, append(Env(), extra...)
+	c.Dir, c.Env, c.Stdin = dir, append(Env(), extra...), stdin
+	return output(ctx, c, " after "+timeout.String())
+}
+
+// Group runs name in dir with exactly env and no deadline of its own, in a new process group. Ending ctx
+// sends SIGTERM to the group, so the command can end its own children; whatever is left in the group when
+// the command returns gets SIGKILL. Output, errors and logging are as for Cmd.
+func Group(ctx context.Context, dir string, env []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	c := exec.CommandContext(ctx, name, args...)
+	c.Dir, c.Env, c.Stdin = dir, env, stdin
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGTERM) }
+	out, err := output(ctx, c, "")
+	if c.Process != nil {
+		syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+	}
+	return out, err
+}
+
+// output runs c and returns stdout. A deadline that ends ctx is ErrTimeout; a non-zero exit is *Error.
+// After ctx ends it waits at most 5s more for children still holding the output pipes.
+func output(ctx context.Context, c *exec.Cmd, after string) ([]byte, error) {
 	c.WaitDelay = 5 * time.Second
-	c.Stdin = stdin
 	var stderr bytes.Buffer
 	c.Stderr = &stderr
 	start := time.Now()
@@ -49,15 +70,16 @@ func CmdEnv(ctx context.Context, timeout time.Duration, dir string, extra []stri
 	if c.ProcessState != nil {
 		exit = c.ProcessState.ExitCode()
 	}
-	attrs := []any{"argv", append([]string{name}, args...), "dir", dir, "duration_ms", time.Since(start).Milliseconds(), "exit", exit}
+	line := strings.Join(c.Args, " ")
+	attrs := []any{"argv", c.Args, "dir", c.Dir, "duration_ms", time.Since(start).Milliseconds(), "exit", exit}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		slog.WarnContext(ctx, "exec timed out", append(attrs, "stderr", tail(stderr.String()))...)
-		return out, fmt.Errorf("%s %s: %w after %s", name, strings.Join(args, " "), ErrTimeout, timeout)
+		return out, fmt.Errorf("%s: %w%s", line, ErrTimeout, after)
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "exec failed", append(attrs, "stderr", tail(stderr.String()), "stdout", tail(string(out)))...)
 		e := &Error{Stderr: strings.TrimSpace(stderr.String()), Err: err}
-		e.Msg = fmt.Sprintf("%s %s: %v: %s", name, strings.Join(args, " "), err, e.Stderr)
+		e.Msg = fmt.Sprintf("%s: %v: %s", line, err, e.Stderr)
 		if s := tail(string(out)); s != "" {
 			e.Msg += "\nstdout: " + s
 		}
