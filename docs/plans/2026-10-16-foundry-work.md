@@ -42,7 +42,7 @@
 
 1. **A claim comment by someone other than the bot** on a public repo must not steer release. `CurrentClaim` reads only the bot's comments. Pinned in Task B3 (`TestCurrentClaimIgnoresOtherAuthors`).
 2. **The agent's grandchildren at timeout**: `foundry ship` waiting on CI under a killed `claude` must die too, or it keeps pushing after the issue is marked stuck. The runner kills the whole process group. Pinned in Task B8 (`TestWorkKillsHungAgent`).
-3. **The webhook URL in an error**: Go's HTTP errors quote the URL, and Discord's URL is the secret. Pinned in Task B7 (`TestNotifyNeverQuotesTheWebhookURL`).
+3. **The webhook URL in an error**: Go's HTTP errors quote the URL, and Discord's URL is the secret. Pinned in Task B8 (`TestWorkNeverLeaksTheWebhookURL`).
 4. **A missing secret file** must stop `work` at startup with exit 2, naming the file and never printing a value. Pinned in Task B8 (`TestWorkFailsAtStartupWithoutASecretFile`).
 5. **A window that wraps midnight** (`22:00-07:00`) must be open at 23:30 and 06:59 and closed at 07:00. Pinned in Task B3 (`TestWindow`).
 
@@ -1218,7 +1218,7 @@ func TestDecide(t *testing.T) {
 }
 
 func TestPickOrdersByHitsThenAgeAndSkipsTaken(t *testing.T) {
-	trusted := []string{"bot", "owner"}
+	trusted := []string{"bot", "Owner"}
 	hit := ports.Comment{Author: "bot", Body: "Hit again from branch `x`."}
 	spam := ports.Comment{Author: "stranger", Body: "Hit again from branch `y`."}
 	ready := []ports.Issue{
@@ -1459,7 +1459,7 @@ func CurrentClaim(comments []ports.Comment, bot string) (Claim, bool) {
 	for _, cm := range comments {
 		first, _, _ := strings.Cut(cm.Body, "\n")
 		id, ok := strings.CutPrefix(strings.TrimSpace(first), claimPrefix)
-		if ok && id != "" && cm.Author == bot && (!found || !cm.CreatedAt.Before(c.At)) {
+		if ok && id != "" && strings.EqualFold(cm.Author, bot) && (!found || !cm.CreatedAt.Before(c.At)) {
 			c, found = Claim{RunID: id, At: cm.CreatedAt}, true
 		}
 	}
@@ -1516,7 +1516,7 @@ import (
 func Hits(is ports.Issue, trusted []string) int {
 	n := 1
 	for _, c := range is.Comments {
-		if slices.Contains(trusted, c.Author) && strings.HasPrefix(c.Body, friction.HitAgain) {
+		if Trusted(trusted, c.Author) && strings.HasPrefix(c.Body, friction.HitAgain) {
 			n++
 		}
 	}
@@ -1529,7 +1529,7 @@ func Hits(is ports.Issue, trusted []string) int {
 func Pick(ready []ports.Issue, open []ports.PR, max int, trusted []string) []ports.Issue {
 	var out []ports.Issue
 	for _, is := range ready {
-		if !slices.Contains(trusted, is.Author) || slices.Contains(is.Labels, friction.InProgress) ||
+		if !Trusted(trusted, is.Author) || slices.Contains(is.Labels, friction.InProgress) ||
 			slices.Contains(is.Labels, friction.Stuck) || hasPR(is.Number, open) {
 			continue
 		}
@@ -1542,6 +1542,11 @@ func Pick(ready []ports.Issue, open []ports.PR, max int, trusted []string) []por
 		return a.CreatedAt.Compare(b.CreatedAt)
 	})
 	return out[:min(max, len(out))]
+}
+
+// Trusted reports whether login is one of trusted. GitHub logins are case-insensitive.
+func Trusted(trusted []string, login string) bool {
+	return slices.ContainsFunc(trusted, func(t string) bool { return strings.EqualFold(t, login) })
 }
 
 func hasPR(n int, open []ports.PR) bool {
@@ -2376,23 +2381,20 @@ git commit -m "Run Claude Code headless in a fresh worktree as the agent runner"
 
 **Files:**
 - Create: `internal/adapters/outbound/discord/discord.go`
-- Test: `internal/adapters/outbound/discord/discord_test.go`
+- Test: `internal/adapters/outbound/discord/discord_test.go` (`Render` only; `Notify` is pinned in B8)
 
 **Interfaces:**
 - Consumes: `ports.Notifier`, `ports.Summary`, `ports.ErrTransient` (B3).
 - Produces: `discord.Webhook{URL string; Timeout time.Duration}` implementing `ports.Notifier`; `discord.Render(s ports.Summary) string`.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
+
+`Notify`'s behaviour (the POST, mentions off, the URL never reaching an error, a log or the run record) is pinned end to end in B8 through the built binary. `Render` is pure and gets the unit test:
 
 ```go
 package discord
 
 import (
-	"encoding/json"
-	"errors"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -2400,61 +2402,29 @@ import (
 	"github.com/tunedev/foundry/internal/core/ports"
 )
 
-var summary = ports.Summary{RunID: "20261016-020000", Repo: "acme/widget", CostUSD: 1.25, Wall: 42 * time.Minute,
-	Issues: []ports.IssueReport{
-		{Number: 1, Title: "@everyone slow tests", Outcome: "ready-for-human", PRURL: "https://github.com/acme/widget/pull/9"},
-		{Number: 2, Title: "Flaky e2e", Outcome: "stuck", Reason: "timeout"},
-		{Number: 3, Title: "Rename flag", Outcome: "needs-decision"},
-	}}
-
-func TestNotifyPostsTheSummaryWithoutMentions(t *testing.T) {
-	var got map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		json.Unmarshal(b, &got)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-	if err := (Webhook{URL: srv.URL + "/api/webhooks/1/tok", Timeout: time.Second}).Notify(t.Context(), summary); err != nil {
-		t.Fatal(err)
-	}
-	content, _ := got["content"].(string)
-	for _, want := range []string{"acme/widget", "pull/9", "#2 Flaky e2e: timeout", "#3 Rename flag", "$1.25"} {
-		if !strings.Contains(content, want) {
-			t.Errorf("content lacks %q:\n%s", want, content)
+func TestRenderGroupsIssuesByOutcome(t *testing.T) {
+	s := ports.Summary{RunID: "20261016-020000", Repo: "acme/widget", CostUSD: 1.25, Wall: 42 * time.Minute,
+		Issues: []ports.IssueReport{
+			{Number: 1, Title: "Slow tests", Outcome: "ready-for-human", PRURL: "https://github.com/acme/widget/pull/9"},
+			{Number: 2, Title: "Flaky e2e", Outcome: "stuck", Reason: "timeout"},
+			{Number: 3, Title: "Rename flag", Outcome: "needs-decision"},
+		}}
+	got := Render(s)
+	for _, want := range []string{"acme/widget", "$1.25", "Ready for review:\n- #1 Slow tests: https://github.com/acme/widget/pull/9",
+		"Stuck:\n- #2 Flaky e2e: timeout", "Needs a decision:\n- #3 Rename flag"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lacks %q:\n%s", want, got)
 		}
 	}
-	if am, _ := got["allowed_mentions"].(map[string]any); am == nil || len(am["parse"].([]any)) != 0 {
-		t.Errorf("allowed_mentions %v", got["allowed_mentions"])
-	}
-}
-
-func TestNotifyMarksServerErrorsTransient(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
-	defer srv.Close()
-	err := (Webhook{URL: srv.URL + "/api/webhooks/1/tok", Timeout: time.Second}).Notify(t.Context(), summary)
-	if !errors.Is(err, ports.ErrTransient) {
-		t.Fatalf("502: %v", err)
-	}
-}
-
-func TestNotifyNeverQuotesTheWebhookURL(t *testing.T) {
-	for _, url := range []string{"http://127.0.0.1:1/api/webhooks/1/s3cret", "http://[::1]:1/api/webhooks/1/s3cret"} {
-		err := (Webhook{URL: url, Timeout: time.Second}).Notify(t.Context(), summary)
-		if err == nil || strings.Contains(err.Error(), "s3cret") {
-			t.Fatalf("error %v", err)
-		}
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }))
-	defer srv.Close()
-	if err := (Webhook{URL: srv.URL + "/api/webhooks/1/s3cret", Timeout: time.Second}).Notify(t.Context(), summary); err == nil || strings.Contains(err.Error(), "s3cret") {
-		t.Fatalf("404 error %v", err)
+	s.Issues[0].Title = strings.Repeat("é", 3000)
+	if r := []rune(Render(s)); len(r) > 2000 {
+		t.Errorf("%d characters, want at most 2000", len(r))
 	}
 }
 ```
 
 Run: `go test ./internal/adapters/outbound/discord -v`
-Expected: FAIL to compile (`undefined: Webhook`).
+Expected: FAIL to compile (`undefined: Render`).
 
 - [ ] **Step 2: Implement**
 
@@ -2541,7 +2511,7 @@ func Render(s ports.Summary) string {
 - [ ] **Step 3: Run the tests**
 
 Run: `go test ./internal/adapters/outbound/discord -v`
-Expected: PASS. If `TestNotifyNeverQuotesTheWebhookURL` fails because an inner error still names the path, find which error type carries it and strip it at the same place; do not drop the error.
+Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
@@ -2793,6 +2763,25 @@ Append to `work_test.go`:
 ```go
 func ago(d time.Duration) string { return time.Now().Add(-d).UTC().Format(time.RFC3339) }
 
+// running reports whether pid is still a live process after up to wait. A zombie counts as dead: a killed
+// process reparented to a PID 1 that does not reap stays a zombie.
+func running(pid int, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return false
+		}
+		if f := strings.Fields(string(b[strings.LastIndexByte(string(b), ')')+1:])); len(f) > 0 && f[0] == "Z" {
+			return false
+		}
+		if time.Now().After(deadline) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestWorkShipsReadyIssueToHandOff(t *testing.T) {
 	w := newWorkWorld(t)
 	w.setGH(`{"issues":[` + fmt.Sprintf(readyIssue, 1, 1, ago(time.Hour)) + `]}`)
@@ -2817,7 +2806,7 @@ func TestWorkShipsReadyIssueToHandOff(t *testing.T) {
 	if got := w.agentEnv(1); !slices.Equal(got, want) {
 		t.Fatalf("agent env %v", got)
 	}
-	if d := w.discordBodies(); len(d) != 1 || !strings.Contains(d[0], "pull/1") {
+	if d := w.discordBodies(); len(d) != 1 || !strings.Contains(d[0], "pull/1") || !strings.Contains(d[0], `"allowed_mentions":{"parse":[]}`) {
 		t.Fatalf("discord %q", d)
 	}
 	if b, _ := os.ReadFile(filepath.Join(w.home, "agent", ".claude", "settings.json")); !strings.Contains(string(b), `"Bash(gh:*)"`) {
@@ -2860,7 +2849,7 @@ func TestWorkKillsHungAgent(t *testing.T) {
 	}
 	b, _ := os.ReadFile(filepath.Join(w.root, "claude-1.child"))
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	if pid == 0 || syscall.Kill(pid, 0) == nil {
+	if pid == 0 || running(pid, 3*time.Second) {
 		t.Fatalf("child %d still running", pid)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(w.home, "worktrees")); len(entries) != 0 {
@@ -3024,6 +3013,32 @@ func TestWorkDoesNotDuplicateACommentWhenTheResponseIsLost(t *testing.T) {
 	}
 	if cs := w.comments(1); len(cs) != 2 {
 		t.Fatalf("comments %q, want one claim and one ready", cs)
+	}
+}
+
+func TestWorkNeverLeaksTheWebhookURL(t *testing.T) {
+	const marker = "s3cretWEBHOOKtoken"
+	for name, url := range map[string]string{
+		"refused": "http://127.0.0.1:1/api/webhooks/1/" + marker,
+		"404":     "", // filled below with a server that answers 404
+	} {
+		w := newWorkWorld(t)
+		if url == "" {
+			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { rw.WriteHeader(http.StatusNotFound) }))
+			t.Cleanup(srv.Close)
+			url = srv.URL + "/api/webhooks/1/" + marker
+		}
+		w.write(filepath.Join(w.home, "secrets"), "discord-webhook", url+"\n")
+		w.setGH(`{"issues":[` + fmt.Sprintf(readyIssue, 1, 1, ago(time.Hour)) + `]}`)
+		out, errOut, code := w.work()
+		logs, _ := os.ReadFile(filepath.Join(w.home, "logs", "foundry.jsonl"))
+		runs, _ := os.ReadFile(filepath.Join(w.home, "runs.jsonl"))
+		if code != 0 || strings.Contains(out+errOut+string(logs)+string(runs), marker) {
+			t.Fatalf("%s: code %d, or the webhook token leaked\nstdout %s\nstderr %s", name, code, out, errOut)
+		}
+		if !strings.Contains(string(logs), "discord webhook") {
+			t.Fatalf("%s: the failed summary was not logged", name)
+		}
 	}
 }
 
@@ -3198,7 +3213,9 @@ func comment(ctx context.Context, d WorkDeps, in WorkInput, n int, body string) 
 			if err != nil {
 				return err
 			}
-			if slices.ContainsFunc(cs, func(c ports.Comment) bool { return c.Author == in.Bot && strings.TrimSpace(c.Body) == strings.TrimSpace(body) }) {
+			if slices.ContainsFunc(cs, func(c ports.Comment) bool {
+				return strings.EqualFold(c.Author, in.Bot) && strings.TrimSpace(c.Body) == strings.TrimSpace(body)
+			}) {
 				return nil
 			}
 		}
