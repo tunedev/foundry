@@ -456,11 +456,11 @@ go get go.opentelemetry.io/otel@latest go.opentelemetry.io/otel/sdk@latest go.op
 
 - [ ] **Step 2: Write the failing end-to-end test**
 
-In `e2e_test.go` `newWorld`, build `w.env` from the environment without trace context, since a Claude Code session running the tests can pass its own `TRACEPARENT`, and append `"OTEL_TRACES_EXPORTER=none", "OTEL_METRICS_EXPORTER=none"`, so no test exports to a real collector:
+In `e2e_test.go` `newWorld`, build `w.env` from the environment without trace context or `OTEL_*` settings, since a Claude Code session running the tests can pass its own `TRACEPARENT` and exporter settings that would override the tests' own, and append `"OTEL_TRACES_EXPORTER=none", "OTEL_METRICS_EXPORTER=none"`, so no test exports to a real collector:
 
 ```go
 	base := slices.DeleteFunc(os.Environ(), func(kv string) bool {
-		return strings.HasPrefix(kv, "TRACEPARENT=") || strings.HasPrefix(kv, "TRACESTATE=")
+		return strings.HasPrefix(kv, "TRACEPARENT=") || strings.HasPrefix(kv, "TRACESTATE=") || strings.HasPrefix(kv, "OTEL_")
 	})
 	w.env = append(base,
 		"PATH="+fakebin+":"+os.Getenv("PATH"), "HOME="+root, "FOUNDRY_HOME="+w.home,
@@ -2141,14 +2141,19 @@ func CmdEnv(ctx context.Context, timeout time.Duration, dir string, extra []stri
 	return output(ctx, c, " after "+timeout.String())
 }
 
-// Group runs name in dir with exactly env and no deadline of its own, in a new process group: ending ctx
-// kills every process the command started. Output, errors and logging are as for Cmd.
+// Group runs name in dir with exactly env and no deadline of its own, in a new process group. Ending ctx
+// sends SIGTERM to the group, so the command can end its own children; whatever is left in the group when
+// the command returns gets SIGKILL. Output, errors and logging are as for Cmd.
 func Group(ctx context.Context, dir string, env []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, name, args...)
 	c.Dir, c.Env, c.Stdin = dir, env, stdin
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
-	return output(ctx, c, "")
+	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGTERM) }
+	out, err := output(ctx, c, "")
+	if c.Process != nil {
+		syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+	}
+	return out, err
 }
 
 // output runs c and returns stdout. A deadline that ends ctx is ErrTimeout; a non-zero exit is *Error.
@@ -3680,6 +3685,7 @@ Before it, file one `friction:ready` issue on the sandbox with a small, real fix
 - The Discord message arrived.
 - In Grafana, Explore, Tempo, the run's `foundry.work` trace shows `foundry.issue`, `foundry.agent`, `claude_code.interaction` and `foundry.ship` with its steps.
 - The agent's edits and `go` commands were allowed: if the agent was denied, read the session with `claude --resume <session id>` under the agent home and fix the permission rules.
+- Nothing outlives a killed agent. File a second sandbox issue whose fix needs a long Bash command (for example a test that sleeps 10 minutes). Run `FOUNDRY_ISSUE_TIMEOUT=2m foundry work`, then `pgrep -af 'foundry ship|go test'` must print nothing. If something survives because Claude Code starts Bash commands in their own session, run each agent in its own systemd scope (`systemd-run --user --scope`) and stop it by cgroup. Record that as a `Ruling:`.
 
 - [ ] **Step 3: Increment note**
 
