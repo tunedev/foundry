@@ -93,3 +93,19 @@ func TestLoadWorkStringAndListKeysFromEnv(t *testing.T) {
 		t.Errorf("bad env window: %v", err)
 	}
 }
+
+func TestLoadRejectsReservedAgentPassEnv(t *testing.T) {
+	home := t.TempDir()
+	os.WriteFile(filepath.Join(home, "config.toml"), []byte("agent_pass_env = [\" FAKE_STATE \", \"GOFLAGS\"]\n"), 0o644)
+	c, err := Load(home, env(nil))
+	if err != nil || strings.Join(c.AgentPassEnv, "|") != "FAKE_STATE|GOFLAGS" {
+		t.Fatalf("%q %v", c.AgentPassEnv, err)
+	}
+	for _, name := range []string{"HOME", " PATH", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "VOUCH_HOME", "FOUNDRY_HOME",
+		"CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_EXPORTER_OTLP_ENDPOINT", "TRACEPARENT", "TRACESTATE"} {
+		_, err := Load(t.TempDir(), env(map[string]string{"FOUNDRY_AGENT_PASS_ENV": "GOFLAGS," + name}))
+		if err == nil || !strings.Contains(err.Error(), "agent_pass_env: "+strings.TrimSpace(name)+" ") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

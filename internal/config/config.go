@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -116,8 +117,9 @@ func Load(home string, getenv func(string) string) (Config, error) {
 		}
 	}
 	if v := getenv("FOUNDRY_AGENT_PASS_ENV"); v != "" {
-		c.AgentPassEnv = nonEmpty(strings.Split(v, ","))
+		c.AgentPassEnv = strings.Split(v, ",")
 	}
+	c.AgentPassEnv = trimmed(c.AgentPassEnv)
 	for p, name := range map[*string]string{&c.GitHubTokenFile: "github-token", &c.ClaudeTokenFile: "claude-oauth-token", &c.DiscordWebhookFile: "discord-webhook"} {
 		if *p == "" {
 			*p = filepath.Join(home, "secrets", name)
@@ -126,14 +128,25 @@ func Load(home string, getenv func(string) string) (Config, error) {
 	return c, c.validate()
 }
 
-func nonEmpty(items []string) []string {
+// trimmed is items without surrounding whitespace, dropping the empty ones.
+func trimmed(items []string) []string {
 	var out []string
 	for _, s := range items {
-		if s != "" {
+		if s = strings.TrimSpace(s); s != "" {
 			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// reservedEnv names the variables foundry sets in the agent's environment; reservedPrefixes are whole families.
+var (
+	reservedEnv      = []string{"HOME", "PATH", "GH_TOKEN", "VOUCH_HOME", "FOUNDRY_HOME", "TRACEPARENT", "TRACESTATE"}
+	reservedPrefixes = []string{"CLAUDE_CODE_", "OTEL_"}
+)
+
+func reserved(name string) bool {
+	return slices.Contains(reservedEnv, name) || slices.ContainsFunc(reservedPrefixes, func(p string) bool { return strings.HasPrefix(name, p) })
 }
 
 func (c *Config) strings() map[string]*string {
@@ -174,6 +187,11 @@ func (c *Config) validate() error {
 	}
 	if _, err := c.Level(); err != nil {
 		errs = append(errs, fmt.Errorf("log_level: %w", err))
+	}
+	for _, name := range c.AgentPassEnv {
+		if reserved(name) {
+			errs = append(errs, fmt.Errorf("agent_pass_env: %s is set by foundry and cannot be passed through", name))
+		}
 	}
 	return errors.Join(errs...)
 }

@@ -57,7 +57,8 @@ Needs `bot_name`, `bot_email` and the secret files `github_token_file`, `claude_
 `~/.foundry/config.toml` (or `$FOUNDRY_HOME`), each key overridable by `FOUNDRY_<KEY>`:
 `call_timeout`, `review_timeout`, `check_timeout`, `ci_timeout`, `ci_poll`, `retry_pause`,
 `user_data_paths`, `log_level`, `work_window`, `claim_lease`, `issue_timeout`, `max_issues_per_run`,
-`max_turns`, `max_review_rounds`, `agent_pass_env` (comma-separated in the environment), `bot_name`,
+`max_turns`, `max_review_rounds`, `agent_pass_env` (comma-separated in the environment; names foundry
+sets for the agent, such as `HOME`, `PATH`, `GH_TOKEN`, `CLAUDE_CODE_*` and `OTEL_*`, are rejected), `bot_name`,
 `bot_email`, `github_token_file`, `claude_token_file`, `discord_webhook_file`. `foundry config` prints the resolved values.
 
 Telemetry goes to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4318`);
