@@ -37,12 +37,14 @@ func exitCode(e *run.Error) int {
 
 var severities = []string{"blocker", "critical", "major", "minor", "nit"}
 
-// severityCounts counts the unindented lines of vouch's findings that start with a severity word.
+// severityCounts counts the finding lines of vouch's output, "- <severity> <location>: ...", per severity. Header and
+// indented continuation lines are not counted.
 func severityCounts(stderr string) map[string]int {
 	counts := map[string]int{}
 	for _, line := range strings.Split(stderr, "\n") {
-		w, _, _ := strings.Cut(line, " ")
-		if w = strings.ToLower(w); slices.Contains(severities, w) {
+		item, ok := strings.CutPrefix(line, "- ")
+		w, _, _ := strings.Cut(item, " ")
+		if w = strings.ToLower(w); ok && slices.Contains(severities, w) {
 			counts[w]++
 		}
 	}

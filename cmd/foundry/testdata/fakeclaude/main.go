@@ -47,7 +47,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "panic: fake crash")
 		os.Exit(3)
 	case "review-loop":
-		write("vouch-gate-fail", "minor calc.go:1 unbounded retry\n")
+		write("vouch-gate-fail", "- minor calc.go:1: unbounded retry\n")
 		for i := range 5 {
 			commit(fmt.Sprint("attempt ", i))
 			if strings.Contains(foundry("ship", "--recap", recap(n)), "did not converge") {

@@ -318,7 +318,7 @@ func TestShipStopsAtVouchFindings(t *testing.T) {
 	w := newWorld(t, "feat")
 	sink := startSink(t)
 	w.exportTo(sink)
-	w.write(w.root, "vouch-gate-fail", "minor calc.go:1 retries on HTTP 502 without backoff\n")
+	w.write(w.root, "vouch-gate-fail", "vouch: review r1 has 1 finding(s) at minor or above:\n- minor calc.go:1: retries on HTTP 502 without backoff\n")
 	out, _, code := w.foundry("ship", "--recap", w.recap())
 	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") || !strings.Contains(out, "without backoff") {
 		t.Fatalf("code %d\n%s", code, out)
@@ -438,7 +438,7 @@ func TestShipStopsWithoutForcePushingADivergedBranch(t *testing.T) {
 func TestShipStopsWhenReviewDoesNotConverge(t *testing.T) {
 	w := newWorld(t, "feat")
 	w.env = append(w.env, "FOUNDRY_MAX_REVIEW_ROUNDS=2")
-	w.write(w.root, "vouch-gate-fail", "minor calc.go:1 unbounded retry\n")
+	w.write(w.root, "vouch-gate-fail", "- minor calc.go:1: unbounded retry\n")
 	out, _, code := w.foundry("ship", "--recap", w.recap())
 	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") {
 		t.Fatalf("round 1: code %d\n%s", code, out)
