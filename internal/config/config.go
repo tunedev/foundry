@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,26 +26,28 @@ func (d *Duration) UnmarshalText(b []byte) error {
 func (d Duration) MarshalText() ([]byte, error) { return []byte(d.String()), nil }
 
 type Config struct {
-	CallTimeout   Duration `toml:"call_timeout"`
-	ReviewTimeout Duration `toml:"review_timeout"`
-	CheckTimeout  Duration `toml:"check_timeout"`
-	CITimeout     Duration `toml:"ci_timeout"`
-	CIPoll        Duration `toml:"ci_poll"`
-	RetryPause    Duration `toml:"retry_pause"`
-	UserDataPaths []string `toml:"user_data_paths"`
-	LogLevel      string   `toml:"log_level"`
-	Home          string   `toml:"-"`
+	CallTimeout     Duration `toml:"call_timeout"`
+	ReviewTimeout   Duration `toml:"review_timeout"`
+	CheckTimeout    Duration `toml:"check_timeout"`
+	CITimeout       Duration `toml:"ci_timeout"`
+	CIPoll          Duration `toml:"ci_poll"`
+	RetryPause      Duration `toml:"retry_pause"`
+	MaxReviewRounds int      `toml:"max_review_rounds"`
+	UserDataPaths   []string `toml:"user_data_paths"`
+	LogLevel        string   `toml:"log_level"`
+	Home            string   `toml:"-"`
 }
 
 func Defaults() Config {
 	return Config{
-		CallTimeout:   Duration{2 * time.Minute},
-		ReviewTimeout: Duration{30 * time.Minute},
-		CheckTimeout:  Duration{30 * time.Minute},
-		CITimeout:     Duration{45 * time.Minute},
-		CIPoll:        Duration{30 * time.Second},
-		RetryPause:    Duration{2 * time.Second},
-		LogLevel:      "info",
+		CallTimeout:     Duration{2 * time.Minute},
+		ReviewTimeout:   Duration{30 * time.Minute},
+		CheckTimeout:    Duration{30 * time.Minute},
+		CITimeout:       Duration{45 * time.Minute},
+		CIPoll:          Duration{30 * time.Second},
+		RetryPause:      Duration{2 * time.Second},
+		MaxReviewRounds: 3,
+		LogLevel:        "info",
 	}
 }
 
@@ -80,6 +83,16 @@ func Load(home string, getenv func(string) string) (Config, error) {
 			}
 		}
 	}
+	for key, n := range c.ints() {
+		name := "FOUNDRY_" + strings.ToUpper(key)
+		if v := getenv(name); v != "" {
+			i, err := strconv.Atoi(v)
+			if err != nil {
+				return c, fmt.Errorf("%s: %w", name, err)
+			}
+			*n = i
+		}
+	}
 	if v := getenv("FOUNDRY_LOG_LEVEL"); v != "" {
 		c.LogLevel = v
 	}
@@ -93,11 +106,20 @@ func (c *Config) durations() map[string]*Duration {
 	}
 }
 
+func (c *Config) ints() map[string]*int {
+	return map[string]*int{"max_review_rounds": &c.MaxReviewRounds}
+}
+
 func (c *Config) validate() error {
 	var errs []error
 	for key, d := range c.durations() {
 		if d.Duration <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", key))
+		}
+	}
+	for key, n := range c.ints() {
+		if *n < 1 {
+			errs = append(errs, fmt.Errorf("%s must be at least 1", key))
 		}
 	}
 	if _, err := c.Level(); err != nil {

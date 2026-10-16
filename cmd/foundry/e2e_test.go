@@ -146,6 +146,7 @@ func (w *world) gh() ghState {
 type runLine struct {
 	Branch, Step, Outcome string
 	PRURL                 string `json:"pr_url"`
+	Detail                string
 }
 
 func (w *world) runs() []runLine {
@@ -406,5 +407,28 @@ func TestShipStopsWithoutForcePushingADivergedBranch(t *testing.T) {
 	if code != 1 || !strings.Contains(out, "stop at push-pr") || !strings.Contains(out, "never force-pushes") ||
 		w.git(w.origin, "rev-parse", "refs/heads/feat") != remote {
 		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestShipStopsWhenReviewDoesNotConverge(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.env = append(w.env, "FOUNDRY_MAX_REVIEW_ROUNDS=2")
+	w.write(w.root, "vouch-gate-fail", "minor calc.go:1 unbounded retry\n")
+	out, _, code := w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") {
+		t.Fatalf("round 1: code %d\n%s", code, out)
+	}
+	if out, _, _ = w.foundry("ship", "--recap", w.recap()); !strings.Contains(out, "vouch did not pass") {
+		t.Fatalf("a rerun at the same HEAD counted a round:\n%s", out)
+	}
+	w.commit("fix attempt")
+	out, _, code = w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "review did not converge after 2 rounds") || !strings.Contains(out, "unbounded retry") ||
+		!strings.Contains(out, "FOUNDRY_MAX_REVIEW_ROUNDS") {
+		t.Fatalf("round 2: code %d\n%s", code, out)
+	}
+	runs := w.runs()
+	if last := runs[len(runs)-1]; last.Step != "review" || !strings.HasPrefix(last.Detail, "review did not converge") {
+		t.Fatalf("run record %+v", last)
 	}
 }

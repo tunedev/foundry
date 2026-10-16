@@ -52,3 +52,13 @@ func TestLoadRepo(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+func TestLoadIntegersFromEnv(t *testing.T) {
+	c, err := Load(t.TempDir(), env(map[string]string{"FOUNDRY_MAX_REVIEW_ROUNDS": "5"}))
+	if err != nil || c.MaxReviewRounds != 5 {
+		t.Fatalf("%d %v", c.MaxReviewRounds, err)
+	}
+	if _, err := Load(t.TempDir(), env(map[string]string{"FOUNDRY_MAX_REVIEW_ROUNDS": "0"})); err == nil || !strings.Contains(err.Error(), "max_review_rounds must be at least 1") {
+		t.Errorf("zero rounds: %v", err)
+	}
+}

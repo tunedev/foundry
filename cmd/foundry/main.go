@@ -135,12 +135,13 @@ func cmdShip(ctx context.Context, cfg config.Config, args []string) int {
 	rep, err := app.Ship(ctx, w.shipDeps(), app.ShipInput{
 		Dir: w.dir, Repo: w.id, Base: w.repo.Base, Checks: w.repo.Checks, Recap: recap, Title: *title,
 		CITimeout: cfg.CITimeout.Duration, CIPoll: cfg.CIPoll.Duration, RetryPause: cfg.RetryPause.Duration,
+		MaxReviewRounds: cfg.MaxReviewRounds,
 	})
 	for _, s := range rep.Passed {
 		fmt.Println("ok", s)
 	}
 	run := store.Run{Time: start, Kind: "ship", Repo: rep.Repo, Branch: rep.Branch, Step: rep.Step,
-		Outcome: outcome(err), PRURL: rep.PRURL, WallMS: time.Since(start).Milliseconds()}
+		Outcome: outcome(err), PRURL: rep.PRURL, Detail: detail(err), WallMS: time.Since(start).Milliseconds()}
 	if rerr := w.store.AppendRun(run); rerr != nil {
 		slog.ErrorContext(ctx, "run record not written", "error", rerr.Error())
 	}
@@ -149,6 +150,18 @@ func cmdShip(ctx context.Context, cfg config.Config, args []string) int {
 	}
 	fmt.Println("ready for human:", rep.PRURL)
 	return exitOK
+}
+
+// detail is the stop's text for the run record, at most 2000 bytes, cut on a character boundary.
+func detail(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if na, ok := errors.AsType[*app.NeedsAction](err); ok {
+		s = na.Detail
+	}
+	return strings.ToValidUTF8(s[:min(len(s), 2000)], "")
 }
 
 func cmdFriction(ctx context.Context, cfg config.Config, args []string) int {

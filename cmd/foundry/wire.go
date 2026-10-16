@@ -54,6 +54,7 @@ func (w repoEnv) shipDeps() app.ShipDeps {
 	return app.ShipDeps{
 		Forge: w.forge, Branch: w.git.Branch, Clean: w.git.Clean, Ahead: w.git.Ahead, HeadSHA: w.git.HeadSHA,
 		RemoteSHA: w.git.RemoteSHA, Push: w.git.Push, Subject: w.git.Subject, Review: v.Review, Answer: w.store.Answer,
+		Rounds: w.store.Rounds, SaveRounds: w.store.SaveRounds,
 		RunCheck: func(ctx context.Context, dir, command string) error {
 			_, err := runner.Cmd(ctx, w.cfg.CheckTimeout.Duration, dir, nil, "sh", "-c", command)
 			return err
