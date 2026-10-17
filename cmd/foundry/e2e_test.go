@@ -198,6 +198,19 @@ func TestFrictionFileCreatesLabelledIssueThenDedupes(t *testing.T) {
 	if s := w.gh(); code != 0 || !strings.Contains(out, "commented on #1") || len(s.Issues) != 1 || len(s.Comments) != 1 {
 		t.Fatalf("code %d\n%s\nstate %+v", code, out, s)
 	}
+	if n := countOf(sink.metricNames(), "foundry_friction_filed_total"); n != 1 {
+		t.Errorf("foundry_friction_filed_total exported %d times, want once: a comment on an existing issue files nothing", n)
+	}
+}
+
+func countOf(names []string, name string) int {
+	n := 0
+	for _, m := range names {
+		if m == name {
+			n++
+		}
+	}
+	return n
 }
 
 func TestFrictionRejectsUnsafeReports(t *testing.T) {

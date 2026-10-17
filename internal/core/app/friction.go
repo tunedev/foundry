@@ -60,7 +60,9 @@ func FileFriction(ctx context.Context, d FrictionDeps, in FileInput) (Filed, err
 	if err != nil {
 		return f, err
 	}
-	frictionFiled.Add(ctx, 1, metric.WithAttributes(attribute.String("repo", in.Repo), attribute.String("kind", string(in.Kind))))
+	if !f.Duplicate {
+		frictionFiled.Add(ctx, 1, metric.WithAttributes(attribute.String("repo", in.Repo), attribute.String("kind", string(in.Kind))))
+	}
 	a.Issues = append(a.Issues, f.Issue.Number)
 	a.None = ""
 	return f, d.Save(in.Repo, in.Branch, a)
