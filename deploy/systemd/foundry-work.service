@@ -5,5 +5,5 @@ After=network-online.target
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:%h/forge/vouch/bin:/usr/local/go/bin:/usr/bin:/bin
-ExecStart=/bin/sh -c 'for d in %h/.foundry/checkouts/*/; do (cd "$$d" && foundry work); done'
+ExecStart=/bin/sh -c 'rc=0; for d in %h/.foundry/checkouts/*/; do [ -d "$$d" ] || continue; (cd "$$d" && foundry work) || rc=1; done; exit $$rc'
 TimeoutStartSec=12h
