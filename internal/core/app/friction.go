@@ -6,6 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/tunedev/foundry/internal/core/friction"
 	"github.com/tunedev/foundry/internal/core/ports"
 )
@@ -48,14 +51,17 @@ func FileFriction(ctx context.Context, d FrictionDeps, in FileInput) (Filed, err
 	}
 	var f Filed
 	var created []ports.Issue
-	err = step(ctx, "file friction", func() error {
-		return retryOnce(ctx, in.RetryPause, func() (err error) {
+	err = step(ctx, "foundry.friction.file", func(ctx context.Context) error {
+		return RetryOnce(ctx, in.RetryPause, func() (err error) {
 			f, created, err = fileOnce(ctx, d.Forge, in, created)
 			return err
 		})
 	})
 	if err != nil {
 		return f, err
+	}
+	if !f.Duplicate {
+		frictionFiled.Add(ctx, 1, metric.WithAttributes(attribute.String("repo", in.Repo), attribute.String("kind", string(in.Kind))))
 	}
 	a.Issues = append(a.Issues, f.Issue.Number)
 	a.None = ""
@@ -82,7 +88,7 @@ func fileOnce(ctx context.Context, forge ports.Forge, in FileInput, beforeCreate
 		}
 	}
 	if m, ok := friction.Match(in.Title, open); ok {
-		return Filed{Issue: m, Duplicate: true}, beforeCreate, forge.CommentIssue(ctx, in.Dir, m.Number, "Hit again from branch `"+in.Branch+"`.\n\n"+in.Body)
+		return Filed{Issue: m, Duplicate: true}, beforeCreate, forge.CommentIssue(ctx, in.Dir, m.Number, friction.HitAgain+" `"+in.Branch+"`.\n\n"+in.Body)
 	}
 	issue, err := forge.CreateIssue(ctx, in.Dir, ports.NewIssue{Title: in.Title, Body: in.Body, Labels: []string{friction.Label, in.Kind.Label()}})
 	return Filed{Issue: issue}, append([]ports.Issue{}, open...), err

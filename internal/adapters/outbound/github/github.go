@@ -14,39 +14,165 @@ import (
 	"github.com/tunedev/foundry/internal/run"
 )
 
-type GitHub struct{ Timeout time.Duration }
+// GitHub runs gh with Token as GH_TOKEN when it is set, and with gh's own login otherwise.
+type GitHub struct {
+	Timeout time.Duration
+	Token   string
+}
 
 func (g GitHub) gh(ctx context.Context, dir, stdin string, args ...string) ([]byte, error) {
 	var in io.Reader
 	if stdin != "" {
 		in = strings.NewReader(stdin)
 	}
-	out, err := run.Cmd(ctx, g.Timeout, dir, in, "gh", args...)
+	var env []string
+	if g.Token != "" {
+		env = []string{"GH_TOKEN=" + g.Token}
+	}
+	out, err := run.CmdEnv(ctx, g.Timeout, dir, env, in, "gh", args...)
 	return out, run.Classify(err)
 }
 
+// Login is the GitHub login gh acts as.
+func (g GitHub) Login(ctx context.Context, dir string) (string, error) {
+	out, err := g.gh(ctx, dir, "", "api", "user", "--jq", ".login")
+	return strings.TrimSpace(string(out)), err
+}
+
+const prFields = "number,url,body,headRefOid,headRefName,state,isCrossRepository"
+
 type prJSON struct {
-	Number     int    `json:"number"`
-	URL        string `json:"url"`
-	Body       string `json:"body"`
-	HeadRefOid string `json:"headRefOid"`
+	Number            int    `json:"number"`
+	URL               string `json:"url"`
+	Body              string `json:"body"`
+	HeadRefOid        string `json:"headRefOid"`
+	HeadRefName       string `json:"headRefName"`
+	State             string `json:"state"`
+	IsCrossRepository bool   `json:"isCrossRepository"`
+}
+
+// prLimit bounds every pull request listing. gh filters --head by branch name alone, so a listing by branch
+// also returns fork pull requests and is read in full before they are dropped.
+const prLimit = "200"
+
+// listPRs lists the repository's own pull requests, newest first. Pull requests from forks are dropped:
+// only accounts with write access can push a branch to the repository itself.
+func (g GitHub) listPRs(ctx context.Context, dir string, args ...string) ([]ports.PR, error) {
+	out, err := g.gh(ctx, dir, "", append([]string{"pr", "list", "--json", prFields}, args...)...)
+	if err != nil {
+		return nil, err
+	}
+	var raw []prJSON
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh pr list: %w", err)
+	}
+	var prs []ports.PR
+	for _, p := range raw {
+		if !p.IsCrossRepository {
+			prs = append(prs, ports.PR{Number: p.Number, URL: p.URL, Body: p.Body, HeadSHA: p.HeadRefOid, Head: p.HeadRefName, State: p.State})
+		}
+	}
+	return prs, nil
+}
+
+func first(prs []ports.PR, err error) (ports.PR, bool, error) {
+	if err != nil || len(prs) == 0 {
+		return ports.PR{}, false, err
+	}
+	return prs[0], true, nil
 }
 
 func (g GitHub) FindPR(ctx context.Context, dir, branch string) (ports.PR, bool, error) {
-	out, err := g.gh(ctx, dir, "", "pr", "list", "--head", branch, "--state", "open",
-		"--json", "number,url,body,headRefOid", "--limit", "1")
+	return first(g.listPRs(ctx, dir, "--head", branch, "--state", "open", "--limit", prLimit))
+}
+
+func (g GitHub) BranchPR(ctx context.Context, dir, branch string) (ports.PR, bool, error) {
+	return first(g.listPRs(ctx, dir, "--head", branch, "--state", "all", "--limit", prLimit))
+}
+
+func (g GitHub) OpenPRs(ctx context.Context, dir string) ([]ports.PR, error) {
+	return g.listPRs(ctx, dir, "--state", "open", "--limit", prLimit)
+}
+
+func (g GitHub) EditLabels(ctx context.Context, dir string, number int, add, remove []string) error {
+	args := []string{"issue", "edit", strconv.Itoa(number)}
+	for _, l := range add {
+		args = append(args, "--add-label", l)
+	}
+	for _, l := range remove {
+		args = append(args, "--remove-label", l)
+	}
+	_, err := g.gh(ctx, dir, "", args...)
+	return err
+}
+
+type author struct {
+	Login string `json:"login"`
+}
+
+type commentJSON struct {
+	Author    author    `json:"author"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+func (c commentJSON) comment() ports.Comment {
+	return ports.Comment{Author: c.Author.Login, Body: c.Body, CreatedAt: c.CreatedAt}
+}
+
+func (g GitHub) IssueComments(ctx context.Context, dir string, number int) ([]ports.Comment, error) {
+	out, err := g.gh(ctx, dir, "", "issue", "view", strconv.Itoa(number), "--json", "comments")
 	if err != nil {
-		return ports.PR{}, false, err
+		return nil, err
 	}
-	var prs []prJSON
-	if err := json.Unmarshal(out, &prs); err != nil {
-		return ports.PR{}, false, fmt.Errorf("gh pr list: %w", err)
+	var raw struct {
+		Comments []commentJSON `json:"comments"`
 	}
-	if len(prs) == 0 {
-		return ports.PR{}, false, nil
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh issue view: %w", err)
 	}
-	p := prs[0]
-	return ports.PR{Number: p.Number, URL: p.URL, Body: p.Body, HeadSHA: p.HeadRefOid}, true, nil
+	cs := make([]ports.Comment, len(raw.Comments))
+	for i, c := range raw.Comments {
+		cs[i] = c.comment()
+	}
+	return cs, nil
+}
+
+type issueJSON struct {
+	Author    author    `json:"author"`
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	URL       string    `json:"url"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
+	Labels    []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	Comments []commentJSON `json:"comments"`
+}
+
+func (g GitHub) OpenIssues(ctx context.Context, dir, label string) ([]ports.Issue, error) {
+	out, err := g.gh(ctx, dir, "", "issue", "list", "--label", label, "--state", "open",
+		"--json", "number,title,url,author,body,createdAt,labels,comments", "--limit", "500")
+	if err != nil {
+		return nil, err
+	}
+	var raw []issueJSON
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("gh issue list: %w", err)
+	}
+	issues := make([]ports.Issue, len(raw))
+	for i, r := range raw {
+		is := ports.Issue{Number: r.Number, Title: r.Title, URL: r.URL, Author: r.Author.Login, Body: r.Body, CreatedAt: r.CreatedAt}
+		for _, l := range r.Labels {
+			is.Labels = append(is.Labels, l.Name)
+		}
+		for _, c := range r.Comments {
+			is.Comments = append(is.Comments, c.comment())
+		}
+		issues[i] = is
+	}
+	return issues, nil
 }
 
 func (g GitHub) CreatePR(ctx context.Context, dir, base, branch, title, body string) (ports.PR, error) {
@@ -99,18 +225,6 @@ func (g GitHub) EnsureLabels(ctx context.Context, dir string, labels []string) e
 		}
 	}
 	return nil
-}
-
-func (g GitHub) OpenIssues(ctx context.Context, dir, label string) ([]ports.Issue, error) {
-	out, err := g.gh(ctx, dir, "", "issue", "list", "--label", label, "--state", "open", "--json", "number,title,url", "--limit", "500")
-	if err != nil {
-		return nil, err
-	}
-	var issues []ports.Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("gh issue list: %w", err)
-	}
-	return issues, nil
 }
 
 func (g GitHub) CreateIssue(ctx context.Context, dir string, in ports.NewIssue) (ports.Issue, error) {

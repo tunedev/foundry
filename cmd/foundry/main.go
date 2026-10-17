@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,9 @@ import (
 	"github.com/tunedev/foundry/internal/core/app"
 	"github.com/tunedev/foundry/internal/core/friction"
 	"github.com/tunedev/foundry/internal/core/ports"
+	"github.com/tunedev/foundry/internal/core/work"
+	"github.com/tunedev/foundry/internal/telemetry"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const usage = `usage: foundry <command>
@@ -30,6 +34,8 @@ const usage = `usage: foundry <command>
         file a friction report, or comment on a similar open one
   friction none --reason <r>
         record that this branch hit no friction
+  work
+        release stale claims, then run an agent on each ready friction issue and send a summary
   config
         print the resolved config
 `
@@ -62,11 +68,28 @@ func dispatch(args []string) int {
 	defer logs.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdown, err := telemetry.Setup(ctx, os.Getenv)
+	if err != nil {
+		return usageErr(err)
+	}
+	defer shutdown(context.WithoutCancel(ctx))
+	ctx, span := telemetry.Start(ctx, "foundry."+args[0], os.Getenv)
+	defer span.End()
+	code := command(ctx, cfg, args)
+	if code != exitOK {
+		span.SetStatus(codes.Error, "exit "+strconv.Itoa(code))
+	}
+	return code
+}
+
+func command(ctx context.Context, cfg config.Config, args []string) int {
 	switch args[0] {
 	case "ship":
 		return cmdShip(ctx, cfg, args[1:])
 	case "friction":
 		return cmdFriction(ctx, cfg, args[1:])
+	case "work":
+		return cmdWork(ctx, cfg, args[1:])
 	case "config":
 		return cmdConfig(cfg)
 	}
@@ -117,12 +140,13 @@ func cmdShip(ctx context.Context, cfg config.Config, args []string) int {
 	rep, err := app.Ship(ctx, w.shipDeps(), app.ShipInput{
 		Dir: w.dir, Repo: w.id, Base: w.repo.Base, Checks: w.repo.Checks, Recap: recap, Title: *title,
 		CITimeout: cfg.CITimeout.Duration, CIPoll: cfg.CIPoll.Duration, RetryPause: cfg.RetryPause.Duration,
+		MaxReviewRounds: cfg.MaxReviewRounds,
 	})
 	for _, s := range rep.Passed {
 		fmt.Println("ok", s)
 	}
 	run := store.Run{Time: start, Kind: "ship", Repo: rep.Repo, Branch: rep.Branch, Step: rep.Step,
-		Outcome: outcome(err), PRURL: rep.PRURL, WallMS: time.Since(start).Milliseconds()}
+		Outcome: outcome(err), PRURL: rep.PRURL, Detail: detail(err), WallMS: time.Since(start).Milliseconds()}
 	if rerr := w.store.AppendRun(run); rerr != nil {
 		slog.ErrorContext(ctx, "run record not written", "error", rerr.Error())
 	}
@@ -131,6 +155,18 @@ func cmdShip(ctx context.Context, cfg config.Config, args []string) int {
 	}
 	fmt.Println("ready for human:", rep.PRURL)
 	return exitOK
+}
+
+// detail is the stop's text for the run record, at most 2000 bytes, cut on a character boundary.
+func detail(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if na, ok := errors.AsType[*app.NeedsAction](err); ok {
+		s = na.Detail
+	}
+	return strings.ToValidUTF8(s[:min(len(s), 2000)], "")
 }
 
 func cmdFriction(ctx context.Context, cfg config.Config, args []string) int {
@@ -228,7 +264,7 @@ func outcome(err error) string {
 	var na *app.NeedsAction
 	switch {
 	case err == nil:
-		return "ready-for-human"
+		return string(work.ReadyForHuman)
 	case errors.As(err, &na):
 		return "needs-action"
 	case errors.Is(err, ports.ErrTransient):

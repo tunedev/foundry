@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -16,8 +17,9 @@ var bin, fakebin string
 
 func TestMain(m *testing.M) {
 	dir, _ := os.MkdirTemp("", "foundry-e2e-")
-	bin, fakebin = filepath.Join(dir, "foundry"), filepath.Join(dir, "fakebin")
-	for out, pkg := range map[string]string{bin: ".", filepath.Join(fakebin, "gh"): "./testdata/fakegh"} {
+	bin, fakebin = filepath.Join(dir, "fakebin", "foundry"), filepath.Join(dir, "fakebin")
+	for out, pkg := range map[string]string{bin: ".", filepath.Join(fakebin, "gh"): "./testdata/fakegh",
+		filepath.Join(fakebin, "claude"): "./testdata/fakeclaude"} {
 		if b, err := exec.Command("go", "build", "-o", out, pkg).CombinedOutput(); err != nil {
 			os.Stderr.Write(b)
 			os.Exit(1)
@@ -39,30 +41,43 @@ type world struct {
 	t                                   *testing.T
 	root, home, checkout, origin, state string
 	env                                 []string
+	discord                             []string
+	discordMu                           *sync.Mutex
 }
 
 func newWorld(t *testing.T, branch string) *world {
 	t.Helper()
+	w := seedWorld(t)
+	w.git(w.checkout, "checkout", "-qb", branch)
+	w.commit("feature work")
+	w.write(w.root, "recap.md", goodRecap)
+	return w
+}
+
+// seedWorld is a bare origin seeded with foundry.toml and calc.go on main, and a clone of it as the checkout.
+func seedWorld(t *testing.T) *world {
+	t.Helper()
 	root := t.TempDir()
 	w := &world{t: t, root: root, home: filepath.Join(root, "foundry-home"), checkout: filepath.Join(root, "work", "widget"),
 		origin: filepath.Join(root, "remotes", "acme", "widget.git"), state: filepath.Join(root, "gh-state.json")}
-	w.env = append(os.Environ(),
+	base := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "TRACEPARENT=") || strings.HasPrefix(kv, "TRACESTATE=") || strings.HasPrefix(kv, "OTEL_")
+	})
+	w.env = append(base,
 		"PATH="+fakebin+":"+os.Getenv("PATH"), "HOME="+root, "FOUNDRY_HOME="+w.home,
 		"FAKE_STATE="+w.state, "FAKE_LOGS="+root,
 		"FOUNDRY_CI_POLL=10ms", "FOUNDRY_RETRY_PAUSE=1ms", "FOUNDRY_CI_TIMEOUT=5s",
 		"GIT_CONFIG_GLOBAL="+filepath.Join(root, ".gitconfig"), "GIT_CONFIG_NOSYSTEM=1",
-		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+		"OTEL_TRACES_EXPORTER=none", "OTEL_METRICS_EXPORTER=none")
 	seed := filepath.Join(root, "seed")
 	w.git("", "init", "-q", "-b", "main", seed)
-	w.write(seed, "foundry.toml", "checks = [\"true\"]\n")
+	w.write(seed, "foundry.toml", "checks = [\"true\"]\nverify = [\"true\"]\n")
 	w.write(seed, "calc.go", "package calc\n")
 	w.git(seed, "add", ".")
 	w.git(seed, "commit", "-qm", "seed")
 	w.git("", "clone", "-q", "--bare", seed, w.origin)
 	w.git("", "clone", "-q", w.origin, w.checkout)
-	w.git(w.checkout, "checkout", "-qb", branch)
-	w.commit("feature work")
-	w.write(root, "recap.md", goodRecap)
 	return w
 }
 
@@ -118,18 +133,21 @@ func (w *world) setGH(js string) { os.WriteFile(w.state, []byte(js), 0o644) }
 
 type ghState struct {
 	PRs []struct {
-		Number     int
-		Body, Head string
+		Number            int
+		Body, Head, State string
 	} `json:"prs"`
 	Issues []struct {
 		Number int
 		Title  string
 		Labels []string
 	} `json:"issues"`
-	Comments    []struct{ Issue int } `json:"comments"`
-	Labels      []string              `json:"labels"`
-	ChecksCalls int                   `json:"checks_calls"`
-	Writes      int                   `json:"writes"`
+	Comments []struct {
+		Issue        int
+		Body, Author string
+	} `json:"comments"`
+	Labels      []string `json:"labels"`
+	ChecksCalls int      `json:"checks_calls"`
+	Writes      int      `json:"writes"`
 }
 
 func (w *world) gh() ghState {
@@ -142,6 +160,7 @@ func (w *world) gh() ghState {
 type runLine struct {
 	Branch, Step, Outcome string
 	PRURL                 string `json:"pr_url"`
+	Detail                string
 }
 
 func (w *world) runs() []runLine {
@@ -161,6 +180,8 @@ func (w *world) runs() []runLine {
 
 func TestFrictionFileCreatesLabelledIssueThenDedupes(t *testing.T) {
 	w := newWorld(t, "feat")
+	sink := startSink(t)
+	w.exportTo(sink)
 	body := w.write(w.root, "f.md", goodFriction)
 	out, errOut, code := w.foundry("friction", "file", "--title", "Test suite takes 4 minutes to run", "--body-file", body, "--kind", "ready")
 	if code != 0 || !strings.Contains(out, "filed #1") {
@@ -170,10 +191,26 @@ func TestFrictionFileCreatesLabelledIssueThenDedupes(t *testing.T) {
 	if len(s.Issues) != 1 || !slices.Equal(s.Issues[0].Labels, []string{"friction", "friction:ready"}) || !slices.Contains(s.Labels, "friction:needs-decision") {
 		t.Fatalf("state %+v", s)
 	}
+	if !slices.Contains(sink.metricNames(), "foundry_friction_filed_total") {
+		t.Errorf("foundry_friction_filed_total not exported; got %v", sink.metricNames())
+	}
 	out, _, code = w.foundry("friction", "file", "--title", "Test suite takes 4 minutes", "--body-file", body, "--kind", "ready")
 	if s := w.gh(); code != 0 || !strings.Contains(out, "commented on #1") || len(s.Issues) != 1 || len(s.Comments) != 1 {
 		t.Fatalf("code %d\n%s\nstate %+v", code, out, s)
 	}
+	if n := countOf(sink.metricNames(), "foundry_friction_filed_total"); n != 1 {
+		t.Errorf("foundry_friction_filed_total exported %d times, want once: a comment on an existing issue files nothing", n)
+	}
+}
+
+func countOf(names []string, name string) int {
+	n := 0
+	for _, m := range names {
+		if m == name {
+			n++
+		}
+	}
+	return n
 }
 
 func TestFrictionRejectsUnsafeReports(t *testing.T) {
@@ -292,10 +329,16 @@ func TestShipStopsAtFailingCheckWithItsOutput(t *testing.T) {
 
 func TestShipStopsAtVouchFindings(t *testing.T) {
 	w := newWorld(t, "feat")
-	w.write(w.root, "vouch-gate-fail", "minor calc.go:1 retries on HTTP 502 without backoff\n")
+	sink := startSink(t)
+	w.exportTo(sink)
+	w.write(w.root, "vouch-gate-fail", "vouch: review r1 has 1 finding(s) at minor or above:\n- minor calc.go:1: retries on HTTP 502 without backoff\n")
 	out, _, code := w.foundry("ship", "--recap", w.recap())
 	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") || !strings.Contains(out, "without backoff") {
 		t.Fatalf("code %d\n%s", code, out)
+	}
+	rv := named(sink.spans(), "foundry.ship.review")
+	if len(rv) != 1 || !strings.Contains(rv[0].Attrs["round"], "1") || !strings.Contains(rv[0].Attrs["findings.minor"], "1") {
+		t.Errorf("review span %+v", rv)
 	}
 }
 
@@ -402,5 +445,28 @@ func TestShipStopsWithoutForcePushingADivergedBranch(t *testing.T) {
 	if code != 1 || !strings.Contains(out, "stop at push-pr") || !strings.Contains(out, "never force-pushes") ||
 		w.git(w.origin, "rev-parse", "refs/heads/feat") != remote {
 		t.Fatalf("code %d\n%s", code, out)
+	}
+}
+
+func TestShipStopsWhenReviewDoesNotConverge(t *testing.T) {
+	w := newWorld(t, "feat")
+	w.env = append(w.env, "FOUNDRY_MAX_REVIEW_ROUNDS=2")
+	w.write(w.root, "vouch-gate-fail", "- minor calc.go:1: unbounded retry\n")
+	out, _, code := w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "stop at review: vouch did not pass") {
+		t.Fatalf("round 1: code %d\n%s", code, out)
+	}
+	if out, _, _ = w.foundry("ship", "--recap", w.recap()); !strings.Contains(out, "vouch did not pass") {
+		t.Fatalf("a rerun at the same HEAD counted a round:\n%s", out)
+	}
+	w.commit("fix attempt")
+	out, _, code = w.foundry("ship", "--recap", w.recap())
+	if code != 1 || !strings.Contains(out, "review did not converge after 2 rounds") || !strings.Contains(out, "unbounded retry") ||
+		!strings.Contains(out, "FOUNDRY_MAX_REVIEW_ROUNDS") {
+		t.Fatalf("round 2: code %d\n%s", code, out)
+	}
+	runs := w.runs()
+	if last := runs[len(runs)-1]; last.Step != "review" || !strings.HasPrefix(last.Detail, "review did not converge") {
+		t.Fatalf("run record %+v", last)
 	}
 }

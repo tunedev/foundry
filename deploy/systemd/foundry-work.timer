@@ -1,0 +1,9 @@
+[Unit]
+Description=Start foundry work every 2 hours
+
+[Timer]
+OnCalendar=*-*-* 00/2:00:00
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

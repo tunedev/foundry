@@ -10,9 +10,9 @@ import (
 	"github.com/tunedev/foundry/internal/core/ports"
 )
 
-// retryOnce runs fn, and runs it once more after a pause of pause/2 plus up to pause of jitter
+// RetryOnce runs fn, and runs it once more after a pause of pause/2 plus up to pause of jitter
 // when the first error is transient. Every other error is returned at once.
-func retryOnce(ctx context.Context, pause time.Duration, fn func() error) error {
+func RetryOnce(ctx context.Context, pause time.Duration, fn func() error) error {
 	err := fn()
 	if !errors.Is(err, ports.ErrTransient) {
 		return err

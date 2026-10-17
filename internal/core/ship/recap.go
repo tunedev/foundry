@@ -28,3 +28,12 @@ func ValidateRecap(body string) error {
 	}
 	return nil
 }
+
+// NotConverged starts the review stop ship gives once a branch has used its review rounds.
+const NotConverged = "review did not converge"
+
+// Rounds is how many reviews of a branch ended in findings, and the commit the last of them reviewed.
+type Rounds struct {
+	Count   int
+	LastSHA string
+}

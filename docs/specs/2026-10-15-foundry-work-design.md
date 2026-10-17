@@ -28,7 +28,9 @@ Success is the three checks in [Success](#success), in order.
 Three pieces, each its own pull request or checked setup:
 
 1. **`infra`: workstation telemetry.** Add an OTel Collector (OTLP on `localhost:4318`) and Tempo
-   to the workstation stack. The collector sends metrics to Prometheus by remote write and traces
+   to the workstation stack. The collector's delta_to_cumulative processor turns foundry's delta
+   counters into running totals, a Prometheus exporter on 127.0.0.1:8889 publishes them and Prometheus
+   scrapes it (with created-timestamp zero ingestion so a new series counts from zero); traces go
    to Tempo; Grafana gains Tempo as a data source and the foundry dashboard. Verified by a test
    span and a test metric reaching Grafana before foundry depends on it.
 2. **`foundry`: `foundry work`, the timer, the summary and telemetry**, as specified below. The
@@ -54,7 +56,11 @@ The core gains one use case, `Work`, and three ports. `Work` calls no adapter di
 
 ### Agent environment
 
-The agent never sees the human's home. Each run gets:
+Claude Code's own file tools (`Read`, `Glob`, `Grep`) cannot read outside the worktree: the settings
+set `permissions.blockReadsOutsideWorkingDirectories` and deny `Read` on each secret file. The
+processes the agent's Bash commands start (`go`, `git`, `foundry`, `vouch`) run as the worker's user
+with no OS-level confinement, so for them the boundary below is advisory until the OS-level sandbox
+in increment 3. Each run gets:
 
 - `HOME=~/.foundry/agent`, holding a git config with the bot's name and email and
   `core.hooksPath` set to vouch's githooks, so vouch's pre-push gate and review posting fire.
@@ -63,7 +69,8 @@ The agent never sees the human's home. Each run gets:
   `foundry ship` writes the run record and friction answers the worker reads), `PATH`, and the
   `OTEL_*` variables below. Nothing else.
 - A Claude Code settings file with the permission allowlist: edits inside the worktree; Bash
-  limited to `go`, `git`, `foundry`, `vouch` and the repo's `verify` commands. No `gh`: the agent
+  limited to `go`, `git`, `foundry`, `vouch` and the repo's `verify` commands; `gh`, `git push`
+  and `git -c` denied as command prefixes. No `gh`: the agent
   reaches GitHub only through `foundry`. The human's hooks, MCP servers, plugins and `CLAUDE.md`
   do not load.
 - The `foundry-ship` skill, installed under the agent home, so the agent follows ship's stop
