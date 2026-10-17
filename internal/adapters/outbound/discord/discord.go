@@ -51,14 +51,20 @@ func (w Webhook) Notify(ctx context.Context, s ports.Summary) error {
 	return fmt.Errorf("discord webhook: HTTP %d", resp.StatusCode)
 }
 
-// Render writes the summary as a Discord message of at most 2000 characters.
+// Render writes the summary as a Discord message of at most 2000 characters. The abort reason comes
+// first, then the issues that need a person, then the ready ones; titles are cut at titleMax characters,
+// and a message over the limit is cut and ends with "(truncated)".
 func Render(s ports.Summary) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "foundry run %s on %s: %d issues, $%.2f, %s\n", s.RunID, s.Repo, len(s.Issues), s.CostUSD, s.Wall.Round(time.Second))
+	if s.Aborted != "" {
+		b.WriteString("Ended early: " + s.Aborted + "\n")
+	}
 	section := func(title, outcome string, line func(ports.IssueReport) string) {
 		var lines []string
 		for _, is := range s.Issues {
 			if is.Outcome == outcome {
+				is.Title = cut(is.Title, titleMax)
 				lines = append(lines, "- "+line(is))
 			}
 		}
@@ -66,12 +72,26 @@ func Render(s ports.Summary) string {
 			b.WriteString(title + ":\n" + strings.Join(lines, "\n") + "\n")
 		}
 	}
-	section("Ready for review", "ready-for-human", func(is ports.IssueReport) string { return fmt.Sprintf("#%d %s: %s", is.Number, is.Title, is.PRURL) })
 	section("Stuck", "stuck", func(is ports.IssueReport) string { return fmt.Sprintf("#%d %s: %s", is.Number, is.Title, is.Reason) })
 	section("Needs a decision", "needs-decision", func(is ports.IssueReport) string { return fmt.Sprintf("#%d %s", is.Number, is.Title) })
-	if s.Aborted != "" {
-		b.WriteString("Ended early: " + s.Aborted + "\n")
+	section("Ready for review", "ready-for-human", func(is ports.IssueReport) string { return fmt.Sprintf("#%d %s: %s", is.Number, is.Title, is.PRURL) })
+	return truncate(b.String(), 2000)
+}
+
+const titleMax = 120
+
+func cut(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
 	}
-	out := []rune(b.String())
-	return string(out[:min(len(out), 2000)])
+	return s
+}
+
+// truncate cuts s to at most n characters, ending a cut message with a marker.
+func truncate(s string, n int) string {
+	const marker = "\n(truncated)"
+	if len([]rune(s)) <= n {
+		return s
+	}
+	return cut(s, n-len(marker)) + marker
 }

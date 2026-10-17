@@ -27,3 +27,21 @@ func TestRenderGroupsIssuesByOutcome(t *testing.T) {
 		t.Errorf("%d characters, want at most 2000", len(r))
 	}
 }
+
+func TestRenderKeepsStuckIssuesAndTheAbortReasonUnderTheLimit(t *testing.T) {
+	s := ports.Summary{RunID: "r", Repo: "acme/widget", Aborted: "forge unreachable", Issues: []ports.IssueReport{
+		{Number: 2, Title: "Flaky e2e", Outcome: "stuck", Reason: "timeout"},
+	}}
+	for i := range 40 {
+		s.Issues = append(s.Issues, ports.IssueReport{Number: 10 + i, Title: strings.Repeat("x", 3000), Outcome: "ready-for-human"})
+	}
+	got := Render(s)
+	if r := []rune(got); len(r) > 2000 {
+		t.Errorf("%d characters, want at most 2000", len(r))
+	}
+	for _, want := range []string{"Ended early: forge unreachable", "Stuck:\n- #2 Flaky e2e: timeout", "(truncated)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lacks %q:\n%s", want, got)
+		}
+	}
+}
