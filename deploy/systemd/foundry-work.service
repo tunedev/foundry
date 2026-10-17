@@ -1,6 +1,5 @@
 [Unit]
 Description=foundry work on each checkout in ~/.foundry/checkouts, in turn
-After=network-online.target
 
 [Service]
 Type=oneshot

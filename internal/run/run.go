@@ -19,8 +19,10 @@ import (
 var ErrTimeout = errors.New("timed out")
 
 // Error is a command that exited non-zero. Msg carries the command line, stderr and a stdout excerpt.
+// Exit is the exit code, or -1 when the process was killed or never started.
 type Error struct {
 	Msg, Stderr string
+	Exit        int
 	Err         error
 }
 
@@ -78,7 +80,7 @@ func output(ctx context.Context, c *exec.Cmd, after string) ([]byte, error) {
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "exec failed", append(attrs, "stderr", tail(stderr.String()), "stdout", tail(string(out)))...)
-		e := &Error{Stderr: strings.TrimSpace(stderr.String()), Err: err}
+		e := &Error{Stderr: strings.TrimSpace(stderr.String()), Exit: exit, Err: err}
 		e.Msg = fmt.Sprintf("%s: %v: %s", line, err, e.Stderr)
 		if s := tail(string(out)); s != "" {
 			e.Msg += "\nstdout: " + s

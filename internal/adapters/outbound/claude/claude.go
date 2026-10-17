@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -94,8 +93,8 @@ func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-		return ee.ExitCode()
+	if re, ok := errors.AsType[*run.Error](err); ok {
+		return re.Exit
 	}
 	return -1
 }

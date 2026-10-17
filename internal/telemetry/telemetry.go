@@ -28,7 +28,7 @@ const Scope = "github.com/tunedev/foundry"
 func Setup(ctx context.Context, getenv func(string) string) (func(context.Context), error) {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		slog.Warn("telemetry export failed", "error", err.Error())
+		slog.WarnContext(context.Background(), "telemetry export failed", "error", err.Error())
 	}))
 	res := resource.NewSchemaless(attribute.String("service.name", "foundry"))
 	var stops []func(context.Context) error
