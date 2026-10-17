@@ -102,7 +102,7 @@ func preflight(ctx context.Context, d ShipDeps, in ShipInput) (string, error) {
 		return branch, needs("preflight", "uncommitted changes; commit or stash them, then rerun")
 	}
 	var ahead int
-	if err := retryOnce(ctx, in.RetryPause, func() (err error) { ahead, err = d.Ahead(ctx, in.Dir, in.Base); return err }); err != nil {
+	if err := RetryOnce(ctx, in.RetryPause, func() (err error) { ahead, err = d.Ahead(ctx, in.Dir, in.Base); return err }); err != nil {
 		return branch, err
 	}
 	if ahead == 0 {
@@ -124,7 +124,7 @@ func runChecks(ctx context.Context, d ShipDeps, in ShipInput) error {
 // for the branch; the round that reaches in.MaxReviewRounds stops with ship.NotConverged instead of asking
 // for another fix.
 func review(ctx context.Context, d ShipDeps, in ShipInput, branch string) error {
-	err := retryOnce(ctx, in.RetryPause, func() error { return d.Review(ctx, in.Dir) })
+	err := RetryOnce(ctx, in.RetryPause, func() error { return d.Review(ctx, in.Dir) })
 	switch {
 	case err == nil || isTransient(err):
 		return err
@@ -178,11 +178,11 @@ func pushAndPR(ctx context.Context, d ShipDeps, in ShipInput, branch string) (st
 		return "", pr, err
 	}
 	var remote string
-	if err := retryOnce(ctx, in.RetryPause, func() (err error) { remote, err = d.RemoteSHA(ctx, in.Dir, branch); return err }); err != nil {
+	if err := RetryOnce(ctx, in.RetryPause, func() (err error) { remote, err = d.RemoteSHA(ctx, in.Dir, branch); return err }); err != nil {
 		return head, pr, err
 	}
 	if remote != head {
-		err := retryOnce(ctx, in.RetryPause, func() error { return d.Push(ctx, in.Dir, branch) })
+		err := RetryOnce(ctx, in.RetryPause, func() error { return d.Push(ctx, in.Dir, branch) })
 		if errors.Is(err, ports.ErrDiverged) {
 			return head, pr, needs("push-pr", "origin/%s has commits HEAD lacks: the branch was rebased or amended here, "+
 				"or someone else pushed to it. foundry never force-pushes; ask the user whether to overwrite origin/%s", branch, branch)
@@ -193,7 +193,7 @@ func pushAndPR(ctx context.Context, d ShipDeps, in ShipInput, branch string) (st
 	}
 	var found bool
 	find := func() (err error) { pr, found, err = d.Forge.FindPR(ctx, in.Dir, branch); return err }
-	if err := retryOnce(ctx, in.RetryPause, find); err != nil {
+	if err := RetryOnce(ctx, in.RetryPause, find); err != nil {
 		return head, pr, err
 	}
 	switch {
@@ -214,12 +214,12 @@ func pushAndPR(ctx context.Context, d ShipDeps, in ShipInput, branch string) (st
 			pr, err = d.Forge.CreatePR(ctx, in.Dir, in.Base, branch, title, in.Recap)
 			return err
 		}
-		return head, pr, retryOnce(ctx, in.RetryPause, create)
+		return head, pr, RetryOnce(ctx, in.RetryPause, create)
 	case in.Recap != "" && !sameBody(in.Recap, pr.Body):
 		if err := recapReady(in.Recap); err != nil {
 			return head, pr, err
 		}
-		err := retryOnce(ctx, in.RetryPause, func() error { return d.Forge.EditPRBody(ctx, in.Dir, pr.Number, in.Recap) })
+		err := RetryOnce(ctx, in.RetryPause, func() error { return d.Forge.EditPRBody(ctx, in.Dir, pr.Number, in.Recap) })
 		pr.Body = in.Recap
 		return head, pr, err
 	}
@@ -252,7 +252,7 @@ func waitCI(ctx context.Context, d ShipDeps, in ShipInput, branch, head string, 
 	for {
 		if pr.HeadSHA == head {
 			var checks []ports.Check
-			if err := retryOnce(ctx, in.RetryPause, func() (err error) { checks, err = d.Forge.Checks(ctx, in.Dir, pr.Number); return err }); err != nil {
+			if err := RetryOnce(ctx, in.RetryPause, func() (err error) { checks, err = d.Forge.Checks(ctx, in.Dir, pr.Number); return err }); err != nil {
 				return err
 			}
 			switch state, red := ship.Verdict(checks); state {
@@ -271,7 +271,7 @@ func waitCI(ctx context.Context, d ShipDeps, in ShipInput, branch, head string, 
 		case <-time.After(in.CIPoll):
 		}
 		if pr.HeadSHA != head {
-			if err := retryOnce(ctx, in.RetryPause, func() (err error) { pr, _, err = d.Forge.FindPR(ctx, in.Dir, branch); return err }); err != nil {
+			if err := RetryOnce(ctx, in.RetryPause, func() (err error) { pr, _, err = d.Forge.FindPR(ctx, in.Dir, branch); return err }); err != nil {
 				return err
 			}
 		}

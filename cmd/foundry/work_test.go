@@ -452,6 +452,14 @@ func TestWorkTraceCoversOneIssueThroughShip(t *testing.T) {
 	}
 }
 
+func TestWorkRetriesATransientLoginRead(t *testing.T) {
+	w := newWorkWorld(t)
+	w.setGH(`{"fail_once":{"api user":"HTTP 502: Bad Gateway (https://api.github.com/user)"}}`)
+	if out, errOut, code := w.work(); code != 0 {
+		t.Fatalf("code %d\n%s%s", code, out, errOut)
+	}
+}
+
 func TestWorkFailsAtStartupWhenBotNameIsNotTheTokensLogin(t *testing.T) {
 	w := newWorkWorld(t)
 	w.setGH(`{"user":"Foundry-Bot2","issues":[` + fmt.Sprintf(readyIssue, 1, 1, ago(time.Hour)) + `]}`)

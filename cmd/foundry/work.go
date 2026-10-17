@@ -45,7 +45,11 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 		return usageErr(err)
 	}
 	w.forge.Token = sec.githubToken
-	if err := checkBotLogin(ctx, w, cfg.BotName); err != nil {
+	var login string
+	if err := app.RetryOnce(ctx, cfg.RetryPause.Duration, func() (err error) { login, err = w.forge.Login(ctx, w.dir); return err }); err != nil {
+		return stopWith(fmt.Errorf("work: reading the bot token's GitHub login: %w", err))
+	}
+	if err := checkBotLogin(login, cfg.BotName); err != nil {
 		return usageErr(err)
 	}
 	vouchHome := os.Getenv("VOUCH_HOME")
@@ -75,12 +79,8 @@ func cmdWork(ctx context.Context, cfg config.Config, args []string) int {
 	return exitOK
 }
 
-// checkBotLogin fails unless the bot token acts as bot_name, the login claims and trust are compared against.
-func checkBotLogin(ctx context.Context, w repoEnv, bot string) error {
-	login, err := w.forge.Login(ctx, w.dir)
-	if err != nil {
-		return fmt.Errorf("work: reading the bot token's GitHub login: %w", err)
-	}
+// checkBotLogin fails unless the bot token's login is bot_name, the login claims and trust are compared against.
+func checkBotLogin(login, bot string) error {
 	if !strings.EqualFold(login, bot) {
 		return fmt.Errorf("work: bot_name is %q but the bot token acts as GitHub login %q; set bot_name to the bot's login", bot, login)
 	}

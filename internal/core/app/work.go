@@ -55,7 +55,7 @@ func Work(ctx context.Context, d WorkDeps, in WorkInput) (ports.Summary, error) 
 	}
 	if len(s.Issues) > 0 || err != nil {
 		step(ctx, "foundry.notify", func(ctx context.Context) error {
-			return retryOnce(ctx, in.RetryPause, func() error { return d.Notifier.Notify(ctx, s) })
+			return RetryOnce(ctx, in.RetryPause, func() error { return d.Notifier.Notify(ctx, s) })
 		})
 	}
 	return s, err
@@ -73,7 +73,7 @@ func runWork(ctx context.Context, d WorkDeps, in WorkInput, s *ports.Summary) er
 	if len(picked) == 0 {
 		return nil
 	}
-	if err := retryOnce(ctx, in.RetryPause, func() error { return d.Forge.EnsureLabels(ctx, in.Dir, friction.AllLabels) }); err != nil {
+	if err := RetryOnce(ctx, in.RetryPause, func() error { return d.Forge.EnsureLabels(ctx, in.Dir, friction.AllLabels) }); err != nil {
 		return err
 	}
 	for _, is := range picked {
@@ -93,7 +93,7 @@ func runWork(ctx context.Context, d WorkDeps, in WorkInput, s *ports.Summary) er
 
 func releaseClaims(ctx context.Context, d WorkDeps, in WorkInput) error {
 	var claimed []ports.Issue
-	if err := retryOnce(ctx, in.RetryPause, func() (err error) { claimed, err = d.Forge.OpenIssues(ctx, in.Dir, friction.InProgress); return err }); err != nil {
+	if err := RetryOnce(ctx, in.RetryPause, func() (err error) { claimed, err = d.Forge.OpenIssues(ctx, in.Dir, friction.InProgress); return err }); err != nil {
 		return err
 	}
 	for _, is := range claimed {
@@ -102,7 +102,7 @@ func releaseClaims(ctx context.Context, d WorkDeps, in WorkInput) error {
 		var found bool
 		if ok {
 			branch := work.Branch(is.Number, c.RunID)
-			if err := retryOnce(ctx, in.RetryPause, func() (err error) { pr, found, err = d.Forge.BranchPR(ctx, in.Dir, branch); return err }); err != nil {
+			if err := RetryOnce(ctx, in.RetryPause, func() (err error) { pr, found, err = d.Forge.BranchPR(ctx, in.Dir, branch); return err }); err != nil {
 				return err
 			}
 		}
@@ -127,10 +127,10 @@ func releaseClaims(ctx context.Context, d WorkDeps, in WorkInput) error {
 func pick(ctx context.Context, d WorkDeps, in WorkInput) ([]ports.Issue, error) {
 	var ready []ports.Issue
 	var open []ports.PR
-	if err := retryOnce(ctx, in.RetryPause, func() (err error) { ready, err = d.Forge.OpenIssues(ctx, in.Dir, friction.Ready.Label()); return err }); err != nil {
+	if err := RetryOnce(ctx, in.RetryPause, func() (err error) { ready, err = d.Forge.OpenIssues(ctx, in.Dir, friction.Ready.Label()); return err }); err != nil {
 		return nil, err
 	}
-	if err := retryOnce(ctx, in.RetryPause, func() (err error) { open, err = d.Forge.OpenPRs(ctx, in.Dir); return err }); err != nil {
+	if err := RetryOnce(ctx, in.RetryPause, func() (err error) { open, err = d.Forge.OpenPRs(ctx, in.Dir); return err }); err != nil {
 		return nil, err
 	}
 	return work.Pick(ready, open, in.MaxIssues, in.Trusted), nil
@@ -142,14 +142,14 @@ func relabel(ctx context.Context, d WorkDeps, in WorkInput, n int, body string, 
 	if err := comment(ctx, d, in, n, body); err != nil {
 		return err
 	}
-	return retryOnce(ctx, in.RetryPause, func() error { return d.Forge.EditLabels(ctx, in.Dir, n, add, remove) })
+	return RetryOnce(ctx, in.RetryPause, func() error { return d.Forge.EditLabels(ctx, in.Dir, n, add, remove) })
 }
 
 // comment posts body on issue n. A retry first reads the issue's comments and skips the write when the bot
 // already posted this body, as when the first attempt's response was lost.
 func comment(ctx context.Context, d WorkDeps, in WorkInput, n int, body string) error {
 	attempted := false
-	return retryOnce(ctx, in.RetryPause, func() error {
+	return RetryOnce(ctx, in.RetryPause, func() error {
 		if attempted {
 			cs, err := d.Forge.IssueComments(ctx, in.Dir, n)
 			if err != nil {
